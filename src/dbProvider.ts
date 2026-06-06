@@ -20,14 +20,27 @@ function generateUUID() {
   });
 }
 
-// Check local storage init helper
+// Safe in-memory storage fallback for restricted iframe environment
+const memoryCache: Record<string, string> = {};
+
 function getLocalItem<T>(key: string, defaultValue: T): T {
-  const data = localStorage.getItem(key);
-  return data ? JSON.parse(data) : defaultValue;
+  try {
+    const data = localStorage.getItem(key);
+    return data ? JSON.parse(data) : defaultValue;
+  } catch (e) {
+    console.warn(`localStorage blocked when fetching '${key}'. Using in-memory fallback.`, e);
+    const cached = memoryCache[key];
+    return cached ? JSON.parse(cached) : defaultValue;
+  }
 }
 
 function setLocalItem<T>(key: string, value: T): void {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    console.warn(`localStorage blocked when saving '${key}'. Using in-memory fallback.`, e);
+    memoryCache[key] = JSON.stringify(value);
+  }
 }
 
 export class DBProvider {
@@ -41,10 +54,21 @@ export class DBProvider {
     if (this.isSupabase()) {
       try {
         const { data: { user }, error } = await supabase!.auth.getUser();
-        if (error) throw error;
+        if (error) {
+          if (error.message && (error.message.includes('session missing') || error.message.includes('Auth session missing'))) {
+            console.log('No active session found during initialization (user not logged in).');
+          } else {
+            console.warn('Supabase get user failed:', error);
+          }
+          return null;
+        }
         return user;
-      } catch (err) {
-        console.error('Supabase get user failed:', err);
+      } catch (err: any) {
+        if (err.message && (err.message.includes('session missing') || err.message.includes('Auth session missing'))) {
+          console.log('No active session found during initialization.');
+        } else {
+          console.warn('Unexpected error in getCurrentUser:', err);
+        }
         return null;
       }
     } else {
@@ -142,7 +166,11 @@ export class DBProvider {
       const { error } = await supabase!.auth.signOut();
       if (error) throw error;
     } else {
-      localStorage.removeItem('quest_current_user_id');
+      try {
+        localStorage.removeItem('quest_current_user_id');
+      } catch (e) {
+        delete memoryCache['quest_current_user_id'];
+      }
     }
   }
 

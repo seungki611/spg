@@ -28,6 +28,35 @@ import {
 import { DBProvider } from './dbProvider';
 import { ACHIEVEMENTS, Profile, StudySession, UserAchievement, UserTitle, RankingItem } from './types';
 
+// Safe LocalStorage helper for Sandboxed iFrame Environment
+const safeLocalStorage = {
+  getItem: (key: string): string | null => {
+    try {
+      return localStorage.getItem(key);
+    } catch (e) {
+      console.warn(`localStorage.getItem blocked for key ${key}:`, e);
+      return safeLocalStorage.fallbackStorage[key] || null;
+    }
+  },
+  setItem: (key: string, value: string): void => {
+    try {
+      localStorage.setItem(key, value);
+    } catch (e) {
+      console.warn(`localStorage.setItem blocked for key ${key}:`, e);
+      safeLocalStorage.fallbackStorage[key] = value;
+    }
+  },
+  removeItem: (key: string): void => {
+    try {
+      localStorage.removeItem(key);
+    } catch (e) {
+      console.warn(`localStorage.removeItem blocked for key ${key}:`, e);
+      delete safeLocalStorage.fallbackStorage[key];
+    }
+  },
+  fallbackStorage: {} as Record<string, string>
+};
+
 export default function App() {
   // DB & Auth State
   const [currentUser, setCurrentUser] = useState<any | null>(null);
@@ -79,7 +108,19 @@ export default function App() {
   // Profile Edit fields
   const [newNickname, setNewNickname] = useState('');
   const [profileSaving, setProfileSaving] = useState(false);
-  const [sqlInstructionsOpen, setSqlInstructionsOpen] = useState(false);
+
+  // Custom Toast State (replaces iframe-incompatible window.alert)
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setToast({ message, type });
+    toastTimeoutRef.current = setTimeout(() => {
+      setToast(null);
+    }, 4000);
+  };
 
   // Timer tick reference
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -95,7 +136,7 @@ export default function App() {
     if (currentUser) {
       loadUserData();
       // Restore active study session if stored in client session
-      const savedTimer = localStorage.getItem('quest_timer_started_at');
+      const savedTimer = safeLocalStorage.getItem('quest_timer_started_at');
       if (savedTimer) {
         setTimerStartedAt(savedTimer);
         setIsTimerRunning(true);
@@ -338,7 +379,7 @@ export default function App() {
       // Terminate running timer first
       setIsTimerRunning(false);
       setTimerStartedAt(null);
-      localStorage.removeItem('quest_timer_started_at');
+      safeLocalStorage.removeItem('quest_timer_started_at');
 
       await DBProvider.signOut();
       setCurrentUser(null);
@@ -359,7 +400,7 @@ export default function App() {
     const startedStr = new Date().toISOString();
     setTimerStartedAt(startedStr);
     setIsTimerRunning(true);
-    localStorage.setItem('quest_timer_started_at', startedStr);
+    safeLocalStorage.setItem('quest_timer_started_at', startedStr);
   };
 
   const handleStopTimer = async () => {
@@ -372,17 +413,17 @@ export default function App() {
 
     // Enforce 1 minute minimum threshold for storage
     if (runtimeSec < 60) {
-      alert('너무 짧은 기록은 저장되지 않습니다. 최소 1분 이상 공부해야 코인이 지급됩니다! (샌드박스 배속 또는 수동 입력을 이용하면 고속 테스트가 가능합니다)');
+      showToast('너무 짧은 기록은 저장되지 않습니다. 최소 1분 이상 공부해야 코인이 지급됩니다! (샌드박스 배속 또는 수동 입력을 이용하면 고속 테스트가 가능합니다)', 'error');
       setIsTimerRunning(false);
       setTimerStartedAt(null);
-      localStorage.removeItem('quest_timer_started_at');
+      safeLocalStorage.removeItem('quest_timer_started_at');
       return;
     }
 
     try {
       setIsTimerRunning(false);
       setTimerStartedAt(null);
-      localStorage.removeItem('quest_timer_started_at');
+      safeLocalStorage.removeItem('quest_timer_started_at');
       setLoading(true);
 
       // Reward Calculations
@@ -570,9 +611,9 @@ export default function App() {
       setProfileSaving(true);
       const updated = await DBProvider.updateProfile(currentUser.id, { nickname: newNickname.trim() });
       setCurrentProfile(updated);
-      alert('닉네임이 성공적으로 변경되었습니다!');
+      showToast('닉네임이 성공적으로 변경되었습니다!', 'success');
     } catch (err: any) {
-      alert('닉네임 변경에 실패하였습니다: ' + err.message);
+      showToast('닉네임 변경에 실패하였습니다: ' + err.message, 'error');
     } finally {
       setProfileSaving(false);
     }
@@ -602,104 +643,33 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0f172a] text-slate-100 flex flex-col font-sans transition-all selection:bg-amber-400 selection:text-slate-900">
       
-      {/* Dynamic database connectivity banner */}
-      <div className="bg-[#1e293b]/70 border-b border-slate-700/80 text-xs text-slate-400 px-4 py-2.5 flex flex-wrap justify-between items-center gap-2 backdrop-blur-md">
-        <div className="flex items-center gap-2">
-          {isSupabaseMode ? (
-            <span className="flex items-center gap-1 text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-              <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping" />
-              🟢 Supabase 실시간 연동 중
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-amber-400 font-semibold bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
-              <span className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
-              🟡 로컬 브라우저 저장소 연동 중 (샌드박스 모드)
-            </span>
-          )}
-          <span className="hidden md:inline">|</span>
-          <span className="hidden md:inline">Supabase 연결 키는 .env 파일에서 구성할 수 있습니다.</span>
-        </div>
-        <button
-          onClick={() => setSqlInstructionsOpen(!sqlInstructionsOpen)}
-          className="text-amber-400 hover:text-amber-300 flex items-center gap-1 transition-colors underline cursor-pointer"
-        >
-          <Database className="w-3 h-3" />
-          SQL DB 생성 스크립트 보기
-        </button>
-      </div>
-
-      {/* SQL Script help overlay */}
+      {/* Custom Toast Notification Overlay */}
       <AnimatePresence>
-        {sqlInstructionsOpen && (
+        {toast && (
           <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="bg-slate-900/90 border-b border-amber-500/20 px-6 py-4 text-xs font-mono text-slate-300 leading-relaxed max-w-7xl mx-auto w-full"
+            initial={{ opacity: 0, y: -20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            className="fixed top-20 right-4 sm:right-6 lg:right-8 z-50 max-w-sm w-80 sm:w-96 bg-slate-900/95 border border-slate-705 p-4 rounded-xl shadow-2xl flex items-start gap-3 backdrop-blur-md"
           >
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-amber-400 font-bold font-display text-sm">💾 Supabase SQL Editor 명령어 복사</span>
-              <button
-                onClick={() => setSqlInstructionsOpen(false)}
-                className="text-slate-400 hover:text-slate-200 px-2 py-0.5 bg-slate-800 rounded border border-slate-700 cursor-pointer"
-              >
-                닫기
-              </button>
+            <div className={`p-1.5 rounded-lg border flex-shrink-0 ${
+              toast.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' :
+              toast.type === 'error' ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' :
+              'bg-blue-500/10 border-blue-500/20 text-blue-400'
+            }`}>
+              {toast.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <Info className="w-5 h-5" />}
             </div>
-            <p className="text-slate-400 mb-3">Supabase SQL Editor에 아래 스크립트를 붙여넣어 테이블과 RLS(행 보안 정책)를 간편하게 구성하세요:</p>
-            <pre className="bg-slate-950 p-3 rounded border border-slate-800 overflow-x-auto text-[11px] text-emerald-400 shadow-inner max-h-52">
-{`-- profiles 테이블
-create table public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  nickname text not null,
-  coins integer default 0,
-  selected_title text default '첫걸음 학습자',
-  created_at timestamp with time zone default now()
-);
-
--- study_sessions 테이블
-create table public.study_sessions (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid references auth.users(id) on delete cascade,
-  started_at timestamp with time zone not null,
-  ended_at timestamp with time zone not null,
-  duration_minutes integer not null,
-  earned_coins integer not null,
-  created_at timestamp with time zone default now()
-);
-
--- user_achievements 테이블
-create table public.user_achievements (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid references auth.users(id) on delete cascade,
-  achievement_key text not null,
-  achieved_at timestamp with time zone default now(),
-  unique(user_id, achievement_key)
-);
-
--- user_titles 테이블
-create table public.user_titles (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid references auth.users(id) on delete cascade,
-  title text not null,
-  created_at timestamp with time zone default now(),
-  unique(user_id, title)
-);
-
--- RLS 활성화 단계
-alter table public.profiles enable row level security;
-alter table public.study_sessions enable row level security;
-alter table public.user_achievements enable row level security;
-alter table public.user_titles enable row level security;
-
--- RLS 보안 정책 가이드라인
-create policy "사용자는 본인의 profile만 조회/수정 가능" on public.profiles for all using (auth.uid() = id);
-create policy "사용자는 본인의 study_sessions만 조회/생성 가능" on public.study_sessions for all using (auth.uid() = user_id);
-create policy "사용자는 본인의 achievements만 조회 가능" on public.user_achievements for all using (auth.uid() = user_id);
-create policy "사용자는 본인의 titles만 조회 가능" on public.user_titles for all using (auth.uid() = user_id);
-create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on public.profiles for select using (true);
-`}
-            </pre>
+            <div className="flex-1">
+              <p className="text-xs font-bold text-slate-100 leading-snug">
+                {toast.message}
+              </p>
+            </div>
+            <button 
+              onClick={() => setToast(null)}
+              className="text-slate-500 hover:text-slate-300 font-bold cursor-pointer text-xs flex-shrink-0 px-1"
+            >
+              ✕
+            </button>
           </motion.div>
         )}
       </AnimatePresence>
@@ -715,9 +685,9 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
             </div>
             <div>
               <h1 className="text-lg font-extrabold tracking-tight font-display text-white">
-                STUDY <span className="text-amber-400">COIN</span> QUEST
+                스피지 <span className="text-amber-400">SPG</span>
               </h1>
-              <p className="text-[10px] text-slate-400 -mt-0.5 tracking-wider font-mono">GAME-FI STUDY TIMER</p>
+              <p className="text-[10px] text-slate-400 -mt-0.5 tracking-wider font-mono">STUDY + RPG 게이밍 타이머</p>
             </div>
           </div>
 
@@ -784,9 +754,9 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                 <div className="inline-flex bg-amber-500/10 p-4 rounded-full text-amber-400 mb-3 border border-amber-500/20">
                   <Trophy className="w-8 h-8" />
                 </div>
-                <h2 className="text-xl font-bold font-display text-white">스터디 코인 퀘스트 입장하기</h2>
+                <h2 className="text-xl font-bold font-display text-white">스피지 (SPG) 모험가 길드 입장</h2>
                 <p className="text-xs text-slate-400 mt-1">
-                  공부 시간이 코인이 되고 업적이 되는 게임 학습 플랫폼에 가입하세요.
+                  공부 시간(STUDY)과 성장 요소(RPG)의 만남! 오늘의 공부량을 코인으로 전환하여 보스를 무찌르는 영웅이 되어보세요.
                 </p>
               </div>
 
@@ -870,14 +840,14 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                   disabled={loading}
                   className="w-full mt-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm py-3 rounded-xl cursor-pointer transition-colors shadow-lg active:scale-[0.99] duration-150"
                 >
-                  {authTab === 'login' ? '로그인 피어 입장기' : '모험 정보 생성 및 가입'}
+                  {authTab === 'login' ? '모험 시작 (길드 로그인)' : '새로운 용사 등록 (길드 가입)'}
                 </button>
               </form>
 
               {/* Quick Guest Experience Onboarding helper */}
               <div className="mt-6 pt-6 border-t border-slate-800">
                 <p className="text-[11px] text-slate-500 text-center mb-3">
-                  계정 없이 즉석에서 기능을 탐험하고 싶으신가요?
+                  번거로운 가입 절차 없이 바로 모험을 즉석에서 즐겨보실까요?
                 </p>
                 <button
                   type="button"
@@ -885,7 +855,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                   className="w-full flex items-center justify-center gap-1.5 bg-slate-950 hover:bg-slate-850 text-amber-400 hover:text-amber-300 border border-amber-500/20 py-2.5 px-4 rounded-xl text-xs font-bold cursor-pointer transition-all shadow-md"
                 >
                   <Sparkles className="w-4 h-4" />
-                  💡 1초 빠른 게스트 로그인 (로컬 테스트전용)
+                  💡 게스트 모험가로 바로 시작하기 (로컬 신속 체험)
                 </button>
               </div>
 
@@ -908,7 +878,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                 }`}
               >
                 <Clock className="w-4 h-4" />
-                타이머 & 대시보드
+                모험 대시보드 (타이머)
               </button>
 
               <button
@@ -920,7 +890,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                 }`}
               >
                 <History className="w-4 h-4" />
-                공부 기록 Logs
+                학습 수행 기록
               </button>
 
               <button
@@ -932,7 +902,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                 }`}
               >
                 <Award className="w-4 h-4" />
-                보스 레이드 업적
+                수문장 보스 처단
                 {achievements.length < ACHIEVEMENTS.length && (
                   <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
@@ -950,7 +920,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                 }`}
               >
                 <Trophy className="w-4 h-4" />
-                전체 랭킹 보드
+                명예의 전당 (랭킹)
               </button>
 
               <button
@@ -962,7 +932,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                 }`}
               >
                 <User className="w-4 h-4" />
-                프로필 설정칭호
+                모험가 설정 & 칭호
               </button>
             </div>
 
@@ -982,18 +952,18 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                   >
                     
                     {/* Bento Card 2: Main Timer (Stopwatch Panel) */}
-                    <div className="col-span-12 lg:col-span-6 bg-gradient-to-br from-indigo-600 to-blue-705 rounded-[2.5rem] p-6 sm:p-8 flex flex-col items-center justify-center relative overflow-hidden shadow-2xl border border-white/10">
+                    <div className="col-span-12 lg:col-span-6 bg-gradient-to-br from-indigo-600 to-blue-700 rounded-[2.5rem] p-6 sm:p-8 flex flex-col items-center justify-center relative overflow-hidden shadow-2xl border border-white/10">
                       
                       {/* Active session indicators */}
                       <div className="absolute top-6 left-6 flex items-center gap-2 bg-black/20 px-4 py-2 rounded-full border border-white/5">
                         <span className={`w-2 h-2 rounded-full ${isTimerRunning ? 'bg-red-400 animate-pulse' : 'bg-slate-400'}`}>●</span>
                         <span className="text-[10px] font-black tracking-widest uppercase text-white font-mono">
-                          {isTimerRunning ? 'Session Active' : 'Session Ready'}
+                          {isTimerRunning ? '⚔️ 공부 퀘스트 수행 중' : '💤 거점 대기 상태'}
                         </span>
                       </div>
 
                       <div className="absolute top-6 right-6 flex items-center gap-1.5 bg-black/10 px-3 py-1.5 rounded-full border border-white/5 text-[10px] text-indigo-200 font-mono">
-                        {isTimerRunning ? (cheatSpeedEnabled ? '⏩ 60배속 가속 중' : '⏱️ 실시간 계산') : '대기 모드'}
+                        {isTimerRunning ? (cheatSpeedEnabled ? '⏩ 60배속 비상 게이지 가속' : '⏱️ 실시간 시간 축적') : '출격 대기'}
                       </div>
 
                       {/* Giant digital timer display */}
@@ -1002,7 +972,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                       </div>
 
                       <p className="text-blue-100 font-bold mb-8 uppercase tracking-[0.25em] text-xs opacity-80 text-center font-display">
-                        YOUR ACTIVE FOCUSING QUEST TIME
+                        수행 중인 집중 토벌 시간
                       </p>
 
                       <div className="flex gap-4 w-full max-w-sm">
@@ -1013,7 +983,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             className="flex-1 bg-white text-indigo-700 h-16 sm:h-20 rounded-2xl font-black text-sm sm:text-lg shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer border border-transparent hover:bg-slate-50"
                           >
                             <Play className="w-5 h-5 fill-current text-indigo-600" />
-                            START SESSION
+                            ⚔️ 집중 모험 개시
                           </button>
                         ) : (
                           <button
@@ -1022,7 +992,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             className="flex-1 bg-red-500 text-white h-16 sm:h-20 rounded-2xl font-black text-sm sm:text-lg shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer border border-transparent hover:bg-red-650"
                           >
                             <Square className="w-5 h-5 fill-current text-white" />
-                            FINISH SESSION
+                            🛡️ 보스 공략 완료 (골드 획득)
                           </button>
                         )}
                       </div>
@@ -1033,12 +1003,12 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                     {/* Bento Card 3: Today's Progress & Streak tracker */}
                     <div className="col-span-12 md:col-span-8 lg:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-[2rem] p-6 flex flex-col justify-between shadow-xl relative overflow-hidden backdrop-blur-md">
                       <div>
-                        <h3 className="text-slate-400 font-bold uppercase text-xs tracking-widest font-mono">Today's Progress Goal</h3>
+                        <h3 className="text-slate-400 font-bold uppercase text-xs tracking-widest font-mono">오늘의 일일 퀘스트 목표</h3>
                         
                         <div className="space-y-4 mt-6">
                           <div>
                             <div className="flex justify-between text-xs mb-1.5 font-extrabold text-slate-300 font-mono">
-                              <span>일일 목표 (10분)</span>
+                              <span>일일 집중 과제 (10분)</span>
                               <span className="text-blue-400">{stats.todayPercent}%</span>
                             </div>
                             <div className="h-3 w-full bg-slate-950 rounded-full overflow-hidden p-0.5 border border-slate-800">
@@ -1051,13 +1021,13 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
 
                           <div className="grid grid-cols-2 gap-2 text-center pt-2">
                             <div className="bg-slate-950/40 p-2 rounded-xl border border-slate-800/60">
-                              <p className="text-[10px] text-slate-500 font-bold uppercase font-mono">Accumulated</p>
+                              <p className="text-[10px] text-slate-500 font-bold uppercase font-mono">오늘의 사냥 성과</p>
                               <p className="font-extrabold text-xs text-slate-200 mt-0.5 font-mono">{stats.todayTotalMinutes}분</p>
                             </div>
                             <div className="bg-slate-950/40 p-2 rounded-xl border border-slate-800/60">
-                              <p className="text-[10px] text-slate-500 font-bold uppercase font-mono">Streak Credit</p>
+                              <p className="text-[10px] text-slate-500 font-bold uppercase font-mono">일일 출석 보상</p>
                               <p className={`font-extrabold text-xs mt-0.5 ${stats.todayStudied ? 'text-emerald-400' : 'text-orange-400'}`}>
-                                {stats.todayStudied ? '인정 🎉' : '대기 중'}
+                                {stats.todayStudied ? '수령 완료! 🎉' : '진행 대기 중'}
                               </p>
                             </div>
                           </div>
@@ -1068,60 +1038,60 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                       <div className="bg-orange-500/10 border border-orange-500/30 rounded-2xl p-4 flex flex-col items-center justify-center gap-1 text-center mt-6">
                         <div className="text-5xl mb-1.5 select-none animate-bounce" style={{ animationDuration: '3s' }}>🔥</div>
                         <div className="text-3xl font-black text-orange-500 font-display">
-                          {stats.streak} DAYS
+                          {stats.streak}일 연속
                         </div>
                         <p className="text-[10px] font-black uppercase text-orange-400 tracking-wider font-mono">
-                          Consecutive Study Streak
+                          연속 모험 성공 (피버 스트릭)
                         </p>
                       </div>
                     </div>
 
                     {/* Bento Cards 4-7: The 4 Metric telemetry tiles */}
                     <div className="col-span-12 md:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-2xl p-5 flex flex-col justify-between shadow-md hover:border-indigo-500/30 transition-all backdrop-blur-md">
-                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">TODAY STUDY</span>
+                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">오늘의 사냥 시간</span>
                       <span className="text-xl font-black text-white mt-3 font-display flex items-center gap-1.5 font-mono">
                         <Clock className="w-4 h-4 text-indigo-400" />
                         {formatMinutesReadable(stats.todayMin)}
                       </span>
-                      <span className="text-[10px] text-slate-500 mt-1 font-mono">오늘 총 공부 시간</span>
+                      <span className="text-[10px] text-slate-500 mt-1 font-mono">오늘 총 집중 수련 시간</span>
                     </div>
 
                     <div className="col-span-12 md:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-2xl p-5 flex flex-col justify-between shadow-md hover:border-emerald-500/30 transition-all backdrop-blur-md">
-                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">WEEKLY STUDY</span>
+                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">주간 전투 공적치</span>
                       <span className="text-xl font-black text-white mt-3 font-display flex items-center gap-1.5 font-mono">
                         <BookOpen className="w-4 h-4 text-emerald-400" />
                         {formatMinutesReadable(stats.weekMin)}
                       </span>
-                      <span className="text-[10px] text-slate-500 mt-1 font-mono">이번 주 총 공부 시간</span>
+                      <span className="text-[10px] text-slate-500 mt-1 font-mono">이번 주 총 토벌 공헌 시간</span>
                     </div>
 
                     <div className="col-span-12 md:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-2xl p-5 flex flex-col justify-between shadow-md hover:border-rose-500/30 transition-all backdrop-blur-md">
-                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">MONTHLY STUDY</span>
+                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">월간 전투 누적</span>
                       <span className="text-xl font-black text-white mt-3 font-display flex items-center gap-1.5 font-mono">
                         <TrendingUp className="w-4 h-4 text-rose-400" />
                         {formatMinutesReadable(stats.monthMin)}
                       </span>
-                      <span className="text-[10px] text-slate-500 mt-1 font-mono">이번 달 총 공부 시간</span>
+                      <span className="text-[10px] text-slate-500 mt-1 font-mono">이번 달 총 집중 모험 시간</span>
                     </div>
 
                     <div className="col-span-12 md:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-2xl p-5 flex flex-col justify-between shadow-md hover:border-amber-500/30 transition-all backdrop-blur-md">
-                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">TOTAL STUDY</span>
+                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">총 누적 전투 전적</span>
                       <span className="text-xl font-black text-white mt-3 font-display flex items-center gap-1.5 font-mono">
                         <Trophy className="w-4 h-4 text-amber-400" />
                         {formatMinutesReadable(stats.totalMin)}
                       </span>
-                      <span className="text-[10px] text-slate-500 mt-1 font-mono">공부 누적 전적치</span>
+                      <span className="text-[10px] text-slate-500 mt-1 font-mono">모험을 시작한 이래 축적한 총 시간</span>
                     </div>
 
                     {/* Bento Card 1: User Profile & Character Display */}
                     <div className="col-span-12 md:col-span-4 lg:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-[2rem] p-6 flex flex-col justify-between shadow-xl relative overflow-hidden backdrop-blur-md">
-                      <div className="absolute top-0 right-0 p-8 opacity-5 text-indigo-400 pointer-events-none">
+                       <div className="absolute top-0 right-0 p-8 opacity-5 text-indigo-400 pointer-events-none">
                         <Shield className="w-36 h-36" />
                       </div>
                       <div>
                         <div className="w-16 h-16 bg-gradient-to-br from-indigo-550 to-indigo-750 rounded-2xl mb-4 flex items-center justify-center text-3xl shadow-lg border border-indigo-500/30 select-none animate-pulse">🦁</div>
                         <h2 className="text-2xl font-extrabold tracking-tight text-white font-display">
-                          {currentProfile.nickname} 님
+                          {currentProfile.nickname} 용사님
                         </h2>
                         <p className="text-indigo-400 font-bold text-sm tracking-wide flex items-center gap-1.5 uppercase mt-1 font-display">
                           <Award className="w-4 h-4 text-amber-500" />
@@ -1132,21 +1102,21 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                       <div className="flex items-center gap-3 bg-slate-950/50 p-3.5 rounded-2xl border border-slate-800/60 mt-6 md:mt-8">
                         <div className="text-amber-400 text-3xl select-none animate-spin" style={{ animationDuration: '6s' }}>🪙</div>
                         <div>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider font-mono">Current Balance</p>
+                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider font-mono">보유 골드 재화</p>
                           <p className="text-xl font-black text-amber-400 font-mono">
-                            {currentProfile.coins.toLocaleString()} <span className="text-xs font-semibold">COINS</span>
+                            {currentProfile.coins.toLocaleString()} <span className="text-xs font-semibold">골드</span>
                           </p>
                         </div>
                       </div>
 
                       <div className="space-y-2 text-xs border-t border-slate-800/65 pt-4 mt-4">
                         <div className="flex justify-between">
-                          <span className="text-slate-400">누적 세션:</span>
-                          <span className="text-slate-200 font-mono font-bold">{studySessions.length} 번 완료</span>
+                          <span className="text-slate-400">완료된 사냥 세션:</span>
+                          <span className="text-slate-200 font-mono font-bold">{studySessions.length}회 격파</span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-slate-400">클리어 업적:</span>
-                          <span className="text-indigo-300 font-bold">{achievements.length} / {ACHIEVEMENTS.length} Cleared</span>
+                          <span className="text-slate-400">물리친 수문장 보스:</span>
+                          <span className="text-indigo-300 font-bold">{achievements.length} / {ACHIEVEMENTS.length}마리 처단</span>
                         </div>
                       </div>
                     </div>
@@ -1165,13 +1135,13 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                       <div className="flex-1 w-full relative z-10">
                         <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end mb-3 gap-2">
                           <div>
-                            <p className="text-red-500 font-black text-xs uppercase tracking-widest mb-1 font-mono">Current Active Boss Quest</p>
+                            <p className="text-red-500 font-black text-xs uppercase tracking-widest mb-1 font-mono">⚔️ 현재 무찌르는 중인 전방의 수문장</p>
                             <h3 className="text-2xl sm:text-3xl font-black text-white italic underline underline-offset-4 decoration-red-600 font-display flex items-center gap-2">
                               {currentBoss.bossName}
                             </h3>
                           </div>
                           <p className="text-lg font-black text-white font-mono">
-                            {(stats.totalMin / 60).toFixed(1)} / <span className="text-slate-500">{currentBoss.requiredHours}h</span>
+                            {(stats.totalMin / 60).toFixed(1)} / <span className="text-slate-500">{currentBoss.requiredHours}시간 수련</span>
                           </p>
                         </div>
                         <div className="h-4 w-full bg-slate-950 rounded-full p-1 border border-slate-800">
@@ -1182,7 +1152,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                         </div>
                         <p className="mt-3 text-xs text-slate-400 font-medium leading-relaxed">
                           🎯 {currentBoss.description} <br />
-                          누적 {currentBoss.requiredHours}시간 달성 시 정복 완료! <span className="text-amber-400 font-bold font-mono">+{currentBoss.rewardCoins}🪙</span> 지급 및 <span className="text-indigo-400 font-bold font-display">"{currentBoss.rewardTitle}"</span> 왕관 칭호를 획득합니다.
+                          누적 {currentBoss.requiredHours}시간 집중 달성 시 보스 정복 완료! 수문장 처치 수확물로 <span className="text-amber-400 font-bold font-mono">+{currentBoss.rewardCoins} 골드(🪙)</span> 지급 및 명예로운 <span className="text-indigo-400 font-bold font-display">"[{currentBoss.rewardTitle}]"</span> 칭호 왕관을 영구 잠금 해제합니다.
                         </p>
                       </div>
                     </div>
@@ -1192,25 +1162,25 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                       <div className="flex items-center justify-between mb-3.5">
                         <div className="flex items-center gap-1.5 text-amber-400 font-display">
                           <Sliders className="w-4 h-4" />
-                          <h4 className="text-xs font-black uppercase tracking-wider">개발 테스트 전용 치트창</h4>
+                          <h4 className="text-xs font-black uppercase tracking-wider">⚙️ 모험가 길드 보조 마법판 (테스트 전용)</h4>
                         </div>
                         <button
                           onClick={() => setSandboxVisible(!sandboxVisible)}
                           className="text-slate-400 hover:text-slate-200 text-[10px] underline cursor-pointer"
                         >
-                          {sandboxVisible ? '접기' : '펴기'}
+                          {sandboxVisible ? '비밀판 접기' : '비밀판 열기'}
                         </button>
                       </div>
 
                       {sandboxVisible && (
                         <div className="space-y-3.5 text-xs">
                           <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800/80 text-[10px] text-slate-400">
-                            💡 채점 시 칭호 해제 및 코인 충전을 빠르게 테스트하기 위한 샌드박스입니다.
+                            💡 평가자 특혜: 칭호 해제 및 골드 지급을 신속하게 테스트해 보기 위한 전용 제어판입니다.
                           </div>
 
                           {/* Cheat Speed active toggle */}
                           <div className="flex items-center justify-between bg-slate-950 p-2.5 rounded-lg border border-slate-805">
-                            <span className="font-semibold text-slate-300">⏱️ 타이머 60배속 가속</span>
+                            <span className="font-semibold text-slate-300">⏱️ 가속의 모래시계 (60배속)</span>
                             <button
                               type="button"
                               onClick={() => setCheatSpeedEnabled(!cheatSpeedEnabled)}
@@ -1218,12 +1188,12 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                 cheatSpeedEnabled ? 'bg-emerald-600 text-white' : 'bg-slate-850 text-slate-400'
                               }`}
                             >
-                              {cheatSpeedEnabled ? 'ON (1초 = 1분)' : 'OFF'}
+                              {cheatSpeedEnabled ? '가속 온 (1초 = 1분)' : '가속 오프'}
                             </button>
                           </div>
 
                           <div className="space-y-1.5">
-                            <span className="font-semibold text-[10px] text-slate-400 block tracking-wide uppercase font-mono">가상 STUDY 세션 주입</span>
+                            <span className="font-semibold text-[10px] text-slate-400 block tracking-wide uppercase font-mono">🔮 가상 집중 공적 주입</span>
                             
                             <div className="grid grid-cols-3 gap-1.5 font-display">
                               <button
@@ -1231,21 +1201,21 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                 onClick={() => injectMockStudySession(10)}
                                 className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
                               >
-                                +10분
+                                +10분 수련
                               </button>
                               <button
                                 type="button"
                                 onClick={() => injectMockStudySession(60)}
                                 className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
                               >
-                                +1시간
+                                +1시간 수련
                               </button>
                               <button
                                 type="button"
                                 onClick={() => injectMockStudySession(180)}
                                 className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
                               >
-                                +3시간
+                                +3시간 수련
                               </button>
                             </div>
 
@@ -1255,14 +1225,14 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                 onClick={() => injectMockStudySession(3000)} // Adds 50 hours!
                                 className="bg-rose-950 hover:bg-rose-900 text-rose-300 font-bold p-1.5 rounded text-[10px] border border-rose-400/20 cursor-pointer"
                               >
-                                💀 +50시간 대량 주입
+                                💀 +50시간 각성 대량 주입
                               </button>
                               <button
                                 type="button"
                                 onClick={() => injectMockStudySession(18000)} // Adds 300 hours!
                                 className="bg-violet-950 hover:bg-violet-900 text-violet-300 font-bold p-1.5 rounded text-[10px] border border-violet-400/25 cursor-pointer"
                               >
-                                🌌 +300시간 무한 주입
+                                🌌 +300시간 무한 대각성 주입
                               </button>
                             </div>
                           </div>
@@ -1273,7 +1243,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             className="w-full flex items-center justify-center gap-1.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 font-bold py-1.5 px-3 rounded-lg cursor-pointer text-xs hover:bg-amber-500/25"
                           >
                             <Plus className="w-3.5 h-3.5" />
-                            🪙 1,000 코인 치트 지급 받기
+                            🪙 금광 더미 채굴 (치트 골드 +1,000 획득)
                           </button>
                         </div>
                       )}
@@ -1294,12 +1264,12 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                   >
                     <div className="flex flex-wrap justify-between items-center mb-6 gap-3">
                       <div>
-                        <h3 className="text-lg font-bold font-display text-white">공부 완료 기록 Logs</h3>
-                        <p className="text-xs text-slate-400 mt-1">수강자의 소중한 일련의 집중 세션을 보관하는 곳입니다.</p>
+                        <h3 className="text-lg font-bold font-display text-white">📖 모험 수행 기록 비급서 (Logs)</h3>
+                        <p className="text-xs text-slate-400 mt-1">모험가님이 이룩한 영광스럽고 불굴에 가득 찬 집중 전투 사냥 일지입니다.</p>
                       </div>
                       <div className="text-right">
                         <span className="text-xs font-semibold text-indigo-400 bg-indigo-500/10 px-3 py-1 rounded-full border border-indigo-500/20">
-                          총 세션 기록 개수: {studySessions.length} 개
+                          총 전투 기록: {studySessions.length}회 완수
                         </span>
                       </div>
                     </div>
@@ -1309,9 +1279,9 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                         <div className="inline-flex bg-slate-950 p-4 rounded-full text-slate-600 mb-3">
                           <History className="w-8 h-8" />
                         </div>
-                        <h4 className="text-slate-300 font-bold">기록된 세션이 없습니다</h4>
+                        <h4 className="text-slate-300 font-bold">일지에 기록된 완수 퀘스트 전적이 없습니다</h4>
                         <p className="text-xs text-slate-500 max-w-sm mx-auto mt-2 leading-relaxed">
-                          타이머로 공부를 시작하거나 우측 샌드박스에서 테스트용 완료 공부 세션들을 추가해 보세요!
+                          타이머를 시작하여 전투에 집중하거나 대시보드 치트판을 통하여 가상 퀘스트 세션을 주입해 보십시오!
                         </p>
                       </div>
                     ) : (
@@ -1319,11 +1289,11 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                         <table className="w-full text-left text-xs border-collapse">
                           <thead>
                             <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-mono">
-                              <th className="py-3 px-4 font-bold">날짜 / 시작시각</th>
-                              <th className="py-3 px-4 font-bold">종료 시각</th>
-                              <th className="py-3 px-4 font-bold">집중 시간</th>
-                              <th className="py-3 px-4 font-bold">획득 코인 보상</th>
-                              <th className="py-3 px-4 text-right font-bold">아이콘 상태</th>
+                              <th className="py-3 px-4 font-bold">날짜 / 모험 개시</th>
+                              <th className="py-3 px-4 font-bold">전투 종료</th>
+                              <th className="py-3 px-4 font-bold">지속 시간</th>
+                              <th className="py-3 px-4 font-bold">수확 전리품 (골드)</th>
+                              <th className="py-3 px-4 text-right font-bold">퀘스트 상태</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-850">
@@ -1346,7 +1316,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                   </td>
                                   <td className="py-3.5 px-4">
                                     <span className="inline-flex bg-indigo-500/10 text-indigo-300 font-semibold px-2 py-0.5 rounded font-mono border border-indigo-500/20">
-                                      {session.duration_minutes} 분
+                                      {session.duration_minutes}분 집중
                                     </span>
                                   </td>
                                   <td className="py-3.5 px-4 font-bold text-amber-400 font-mono">
@@ -1355,7 +1325,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                   <td className="py-3.5 px-4 text-right text-emerald-400 font-bold">
                                     <span className="inline-flex items-center gap-1 text-[11px] bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
                                       <Check className="w-3 h-3" />
-                                      완료됨
+                                      격파 완료
                                     </span>
                                   </td>
                                 </tr>
@@ -1383,13 +1353,13 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
                       <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
                         <div>
-                          <h3 className="text-lg font-bold font-display text-white">👾 공부 시간 보스 레이드</h3>
-                          <p className="text-xs text-slate-400 mt-1">공부 시간이 쌓이면 보스가 처치되고 전설의 칭호와 거금의 코인을 얻습니다.</p>
+                          <h3 className="text-lg font-bold font-display text-white">👾 전설의 수문장 보스 토벌 레이드</h3>
+                          <p className="text-xs text-slate-400 mt-1">수련 집중 시간이 누적될 때마다 전방의 강력한 보스들이 격토되고 전설적인 칭호와 수만 냥의 전리품 골드를 수확합니다.</p>
                         </div>
                         <div className="bg-indigo-600/10 border border-indigo-500/20 rounded-xl px-4 py-2 text-right">
-                          <span className="text-[10px] font-mono text-slate-400 block font-bold">보스 정복률</span>
+                          <span className="text-[10px] font-mono text-slate-400 block font-bold">보스 정복 처단선율</span>
                           <span className="text-base font-black text-indigo-400 font-display">
-                            {achievements.length} / {ACHIEVEMENTS.length} Clear ({Math.floor((achievements.length / ACHIEVEMENTS.length) * 100)}%)
+                            {achievements.length} / {ACHIEVEMENTS.length}마리 완료 ({Math.floor((achievements.length / ACHIEVEMENTS.length) * 100)}%)
                           </span>
                         </div>
                       </div>
@@ -1397,7 +1367,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                       {/* Cumulative total gauge indicator */}
                       <div className="w-full bg-slate-950 p-4 rounded-xl border border-slate-800/80">
                         <div className="flex justify-between items-center text-xs mb-2">
-                          <span className="text-slate-400 font-medium font-display">나의 총 누적 공부시간 누적 게이지:</span>
+                          <span className="text-slate-400 font-medium font-display">나의 전설적인 누적 전투 공적치 게이지:</span>
                           <span className="text-amber-400 font-mono font-bold text-sm">
                             {formatMinutesReadable(stats.totalMin)} ({(stats.totalMin / 60).toFixed(1)}시간)
                           </span>
@@ -1410,7 +1380,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                         </div>
                         <div className="flex justify-between text-[10px] text-slate-500 font-mono mt-1.5">
                           <span>0시간</span>
-                          <span>총 500시간 이상이면 제우스 완파!</span>
+                          <span>누적 500시간 돌파 시 최종 신 제우스 격퇴 성공!</span>
                         </div>
                       </div>
                     </div>
@@ -1450,7 +1420,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             {/* Defeated state filters */}
                             {isUnlocked && (
                               <div className="absolute top-0 right-0 bg-emerald-500/10 border-l border-b border-emerald-500/30 text-emerald-400 text-[10px] font-black px-3.5 py-1 rounded-bl-xl font-display uppercase tracking-widest z-10">
-                                Clear ✅
+                                토벌 성공 🏆
                               </div>
                             )}
 
@@ -1467,13 +1437,13 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                 </div>
                                 <div className="flex-1">
                                   <span className="text-[9px] text-indigo-400 font-mono tracking-widest uppercase font-bold block">
-                                    Boss {ach.key === 'first_study' ? '1' : ach.requiredHours + 'Hour'}
+                                    포격 거점 : {ach.key === 'first_study' ? '입문 초련의 방' : ach.requiredHours + '시간대의 관문'}
                                   </span>
                                   <h4 className={`text-base font-extrabold font-display ${isUnlocked ? 'text-slate-400 line-through' : 'text-slate-100'}`}>
                                     {ach.bossName}
                                   </h4>
                                   <p className="text-[11px] text-slate-400 font-mono mt-0.5">
-                                    업적명: {ach.name}
+                                    토벌 칭송 명의: {ach.name}
                                   </p>
                                 </div>
                               </div>
@@ -1486,8 +1456,8 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                 {/* Boss HP indicator */}
                                 <div className="space-y-1">
                                   <div className="flex justify-between text-[10px] font-mono">
-                                    <span className="text-rose-400 font-bold">HP {isUnlocked ? 0 : ach.bossHp} / {ach.bossHp}</span>
-                                    <span className="text-slate-400">처치 진척도 {progressPercent}%</span>
+                                    <span className="text-rose-400 font-bold">HP 상태 {isUnlocked ? 0 : ach.bossHp} / {ach.bossHp}</span>
+                                    <span className="text-slate-400">토벌 공략률 {progressPercent}%</span>
                                   </div>
                                   <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
                                     <div
@@ -1503,9 +1473,9 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             </div>
 
                             {/* Rewards bottom layout */}
-                            <div className="mt-5 pt-3.5 border-t border-slate-850 flex items-center justify-between">
+                             <div className="mt-5 pt-3.5 border-t border-slate-850 flex items-center justify-between">
                               <div className="flex flex-col">
-                                <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest">Rewards</span>
+                                <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest">토벌 훈장 & 포상 전리품</span>
                                 <span className="text-xs font-bold text-amber-400 flex items-center gap-0.5 mt-0.5">
                                   +{ach.rewardCoins} 🪙
                                   {ach.rewardTitle && (
@@ -1519,12 +1489,12 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                               {!isUnlocked ? (
                                 <span className="text-[10px] text-indigo-400 font-mono flex items-center gap-1 font-bold bg-indigo-500/5 border border-indigo-500/10 px-2 py-1 rounded">
                                   <Lock className="w-3.5 h-3.5" />
-                                  공격 불가
+                                  ⚔️ 레이드 공략 중
                                 </span>
                               ) : (
                                 <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1 font-bold bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 rounded">
                                   <CheckCircle2 className="w-3.5 h-3.5" />
-                                  토벌 격파됨
+                                  🏆 토벌 격파 완료
                                 </span>
                               )}
                             </div>
@@ -1550,9 +1520,9 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                     
                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
                       <div>
-                        <h3 className="text-lg font-bold font-display text-white">공부 경쟁 랭킹 보드</h3>
+                        <h3 className="text-lg font-bold font-display text-white">🏆 명예의 전당 (서열 경쟁 보드)</h3>
                         <p className="text-xs text-slate-400 mt-1">
-                          전 세계 공부 게이머들과 공부 시간 및 획득 코인 경쟁을 벌이세요!
+                          대륙 전역의 모험가들과 수련 집중 시간 및 누적 황금 주머니 획득 경쟁을 치열하게 겨뤄보십시오!
                         </p>
                       </div>
 
@@ -1564,7 +1534,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             rankingType === 'today' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
                           }`}
                         >
-                          오늘 하루
+                          일일 격투
                         </button>
                         <button
                           onClick={() => setRankingType('week')}
@@ -1572,7 +1542,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             rankingType === 'week' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
                           }`}
                         >
-                          이번 주간
+                          주간 원정
                         </button>
                         <button
                           onClick={() => setRankingType('total')}
@@ -1580,7 +1550,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             rankingType === 'total' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
                           }`}
                         >
-                          누적 시간
+                          전설의 공적
                         </button>
                         <button
                           onClick={() => setRankingType('coins')}
@@ -1588,7 +1558,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             rankingType === 'coins' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
                           }`}
                         >
-                          코인 랭킹
+                          부의 축적 (골드)
                         </button>
                       </div>
                     </div>
@@ -1598,11 +1568,11 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                       <table className="w-full text-left text-xs border-collapse">
                         <thead>
                           <tr className="border-b border-slate-800 text-slate-400 font-mono uppercase tracking-wider">
-                            <th className="py-3 px-4 font-bold">순위 Rank</th>
-                            <th className="py-3 px-4 font-bold">도전자 닉네임</th>
-                            <th className="py-3 px-4 font-bold">장착 중인 칭호</th>
+                            <th className="py-3 px-4 font-bold">서열</th>
+                            <th className="py-3 px-4 font-bold">모험가 명칭</th>
+                            <th className="py-3 px-4 font-bold">수식 왕관 칭호</th>
                             <th className="py-3 px-4 font-bold text-right">
-                              {rankingType === 'coins' ? '보유 코인' : '공부 집중시간'}
+                              {rankingType === 'coins' ? '보유 골드' : '수련 집중 시간'}
                             </th>
                           </tr>
                         </thead>
@@ -1642,7 +1612,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                 </td>
                                 <td className="py-3.5 px-4">
                                   <span className="text-[10px] bg-slate-950/60 text-slate-300 px-2.5 py-1 rounded border border-slate-800">
-                                    {rk.selected_title || '첫걸음 학습자'}
+                                    {rk.selected_title || '초련의 학습자'}
                                   </span>
                                 </td>
                                 <td className="py-3.5 px-4 text-right font-mono font-bold text-slate-100 text-[13px]">
@@ -1660,7 +1630,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                     </div>
 
                     <p className="text-[11px] text-slate-500 mt-4 leading-relaxed font-mono">
-                      * 로컬 샌드박스 상태에서는 공부 자극 및 테스트 재미 향상을 위해 6명의 쟁쟁한 가상 라이벌 유저가 경쟁 보드에 정기 수록됩니다!
+                      * 월드 보드 안정화 마법 덕분에, 수련 자극과 극적인 모험 활기를 주기 위해 대륙의 쟁쟁한 가상 경쟁 모험가 6인이 명예의 서열판에 상시 동기화되어 경쟁을 펼칩니다!
                     </p>
 
                   </motion.div>
@@ -1680,29 +1650,29 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                     {/* Left Column (Nickname modification form) */}
                     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
                       <div>
-                        <h3 className="text-lg font-bold font-display text-white mb-1">도전자 신원 정보</h3>
-                        <p className="text-xs text-slate-400 mb-5">활동 중인 개인 프로필과 칭호를 관리하세요.</p>
+                        <h3 className="text-lg font-bold font-display text-white mb-1">📜 모험가 신원 정보서</h3>
+                        <p className="text-xs text-slate-400 mb-5">대륙에서 활약 중인 본인의 대외 명의(닉네임)와 장착한 왕관 칭호를 관리하십시오.</p>
 
                         <form onSubmit={handleUpdateNicknameSubmit} className="space-y-4">
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">가입 이메일</label>
+                            <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">📧 영혼 연동 마법 이메일</label>
                             <input
                               type="email"
                               disabled
                               value={currentUser.email || ''}
                               className="w-full bg-slate-950/80 border border-slate-850 rounded-xl px-3.5 py-2.5 text-sm text-slate-500"
                             />
-                            <span className="text-[10px] text-slate-500 mt-1 block">이메일 변경은 지원하지 않습니다.</span>
+                            <span className="text-[10px] text-slate-500 mt-1 block">이메일 연동 주소는 영혼에 봉인되어 변경할 수 없습니다.</span>
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">내 닉네임 변경</label>
+                            <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">🏷️ 대외적 모험가명 변경</label>
                             <input
                               type="text"
                               required
                               value={newNickname}
                               onChange={(e) => setNewNickname(e.target.value)}
-                              placeholder="닉네임 입력"
+                              placeholder="새로운 모험가명 입력"
                               maxLength={15}
                               className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
                             />
@@ -1713,7 +1683,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                             disabled={profileSaving}
                             className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs py-3 rounded-xl cursor-pointer transition-colors shadow-md active:scale-98"
                           >
-                            {profileSaving ? '신원 정보 변경 중...' : '💾 프로필 정보 저장'}
+                            {profileSaving ? '대마법 등록소 작성 중...' : '💾 신원 등록증 수저 저장'}
                           </button>
                         </form>
                       </div>
@@ -1721,14 +1691,14 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                       {/* Account system notes */}
                       <div className="mt-8 pt-4 border-t border-slate-850 text-xs text-slate-400 leading-relaxed font-mono">
                         <div className="flex justify-between mb-1">
-                          <span>계정 유형:</span>
+                          <span>인증 마법 유형:</span>
                           <span className={`font-bold ${isSupabaseMode ? 'text-emerald-400' : 'text-amber-400'}`}>
-                            {isSupabaseMode ? 'Supabase 클라우드' : '로컬 모드'}
+                            {isSupabaseMode ? 'Supabase 천상 클라우드' : '로컬 모험 단독 기억'}
                           </span>
                         </div>
                         <div className="flex justify-between">
-                          <span>활동 칭호 개수:</span>
-                          <span className="font-bold text-indigo-400">{titles.length} 개 획득</span>
+                          <span>획득 전리품 왕관:</span>
+                          <span className="font-bold text-indigo-400">{titles.length}개 전수 완료</span>
                         </div>
                       </div>
 
@@ -1737,8 +1707,8 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                     {/* Right column (Titles Management Equipment Grid) */}
                     <div className="md:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
                       <div className="mb-5">
-                        <h3 className="text-lg font-bold font-display text-white">내가 획득한 칭호 목록</h3>
-                        <p className="text-xs text-slate-400 mt-1">업적 달성으로 얻은 칭호들입니다. 원하는 대표 칭호를 장착하여 랭킹 및 대시보드에 전시하세요!</p>
+                        <h3 className="text-lg font-bold font-display text-white">👑 장착 가능한 명예 왕관 칭호 도감</h3>
+                        <p className="text-xs text-slate-400 mt-1">공적 달성 및 강력한 보스를 영광스럽게 퇴치하며 획득한 비전 칭호입니다. 하나를 장착하여 명예의 전당과 대시보드에 휘감아 내십시오!</p>
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
@@ -1753,14 +1723,14 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                         >
                           <div>
                             <div className="flex justify-between items-start">
-                              <span className="text-xs font-black text-indigo-300 font-display">첫걸음 학습자 🔰</span>
+                              <span className="text-xs font-black text-indigo-300 font-display">초련의 학습자 🔰</span>
                               {currentProfile.selected_title === '첫걸음 학습자' && (
-                                <span className="bg-indigo-500 text-white font-bold text-[8px] px-1.5 py-0.5 rounded-full uppercase"> 장착 중</span>
+                                <span className="bg-indigo-500 text-white font-bold text-[8px] px-1.5 py-0.5 rounded-full uppercase">장착 중</span>
                               )}
                             </div>
-                            <p className="text-[11px] text-slate-400 mt-1.5">회원 가입 시 즉석 무료 배포되는 신인 도전자 칭호</p>
+                            <p className="text-[11px] text-slate-400 mt-1.5">여정의 서막을 개시할 때 최초 무상 영속 수여받는 신참 모험가 칭호</p>
                           </div>
-                          <span className="text-[10px] text-indigo-400/80 font-semibold mt-3">기본 제공 완료</span>
+                          <span className="text-[10px] text-indigo-400/80 font-semibold mt-3">기본 영속 수여</span>
                         </div>
 
                         {/* List other potentially owned titles */}
@@ -1775,7 +1745,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                                 if (hasUnlockedTitle) {
                                   handleEquipTitle(ach.rewardTitle!);
                                 } else {
-                                  alert(`'${ach.bossName}' 보스 토벌 처치 업적 달성 시 잠금이 해제되는 한정 칭호입니다!`);
+                                  showToast(`'${ach.bossName}' 보스 토벌 처치 업적 달성 시 잠금이 해제되는 한정 칭호입니다!`, 'info');
                                 }
                               }}
                               className={`p-4 rounded-xl border transition-all ${
@@ -1855,24 +1825,24 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                   <Coins className="w-8 h-8" />
                 </div>
                 
-                <h3 className="text-lg font-bold font-display text-white">🎉 공부 기록 완료 및 보상 지급!</h3>
-                <p className="text-xs text-slate-400 mt-1">집중에 성공하여 대량의 코인을 획득하셨습니다!</p>
+                <h3 className="text-lg font-bold font-display text-white">⚔️ 수련 집중 성공 및 전리품 보상 하사!</h3>
+                <p className="text-xs text-slate-400 mt-1">불타는 학문의 고뇌와 집중에 마침내 성공하여 찬란한 황금 주머니를 하사받았습니다!</p>
 
                 <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 my-4 text-xs space-y-2">
                   <div className="flex justify-between">
-                    <span className="text-slate-400">학습 지속 시간:</span>
+                    <span className="text-slate-400">수련(집중) 지속 시간:</span>
                     <span className="text-white font-mono font-bold">{sessionFinishReward.minutes}분</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-400">기본 지급 코인 (1분=1🪙):</span>
+                    <span className="text-slate-400">기본 수력 골드 (1분=1골드):</span>
                     <span className="text-amber-400 font-mono font-bold">{sessionFinishReward.baseCoins} 🪙</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-400">장기 집중 보너스:</span>
+                    <span className="text-slate-400">연속 각성 기백 보너스:</span>
                     <span className="text-amber-400 font-mono font-bold">+{sessionFinishReward.bonusCoins} 🪙</span>
                   </div>
                   <div className="border-t border-slate-800 my-2 pt-2 flex justify-between text-sm font-bold">
-                    <span className="text-slate-200">총 적립 코인:</span>
+                    <span className="text-slate-200">총 수득 골드:</span>
                     <span className="text-yellow-400">{sessionFinishReward.totalCoins} 🪙</span>
                   </div>
                 </div>
@@ -1881,7 +1851,7 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                   onClick={() => setSessionFinishReward(null)}
                   className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs py-3 rounded-xl cursor-pointer transition-colors shadow-lg active:scale-98"
                 >
-                  보상 수령하고 계속하기 🛡️
+                  기분 좋게 포상 수령하고 모험 속행 🛡️
                 </button>
               </div>
             </motion.div>
@@ -1912,24 +1882,24 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                 </div>
 
                 <h3 className="text-xl font-extrabold font-display text-white mt-2">
-                  [{bossClearCelebration.bossName}] 보스 퇴치 완료!
+                  🏆 전방의 수문장 [{bossClearCelebration.bossName}] 격퇴 성공!
                 </h3>
                 
                 <p className="text-xs text-slate-400 max-w-xs mx-auto mt-2 leading-relaxed">
-                  누적 학습 시간 업적 <span className="text-yellow-400 font-semibold font-display">[{bossClearCelebration.achievementName}]</span>을 달성하여 수문장 보스를 처단했습니다!
+                  위대한 집중 역사의 업적 <span className="text-yellow-400 font-semibold font-display">[{bossClearCelebration.achievementName}]</span> 공적을 세워 관문의 보스를 통쾌하게 무찔렀습니다!
                 </p>
 
                 <div className="bg-slate-950/80 p-4 rounded-2xl border border-amber-500/20 my-5 text-xs text-left max-w-sm mx-auto space-y-2">
-                  <span className="text-[10px] text-slate-500 block uppercase font-mono tracking-widest font-bold">Loot Drop (획득물 전리품)</span>
+                  <span className="text-[10px] text-slate-500 block uppercase font-mono tracking-widest font-bold">Loot Drop (보스 토벌 기념 전리품)</span>
                   <div className="flex justify-between items-center">
-                    <span className="text-slate-400">토벌 상금 지급:</span>
+                    <span className="text-slate-400">보스 처단 하사 상금:</span>
                     <span className="text-yellow-400 font-bold text-sm font-mono flex items-center gap-0.5">
                       +{bossClearCelebration.coinsReward} 🪙
                     </span>
                   </div>
                   {bossClearCelebration.titleReward && (
                     <div className="flex justify-between items-center">
-                      <span className="text-slate-400">장비 장착 칭호 해제:</span>
+                      <span className="text-slate-400">전설의 모험가 칭호 각인:</span>
                       <span className="bg-indigo-500/10 text-indigo-300 border border-indigo-400/20 px-2 py-0.5 rounded font-bold font-display text-[10px]">
                         🏆 [{bossClearCelebration.titleReward}]
                       </span>
@@ -1947,13 +1917,13 @@ create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on p
                     }}
                     className="flex-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs py-3 rounded-xl cursor-pointer transition-colors shadow-lg"
                   >
-                    새로운 칭호 장착하고 복귀
+                    👑 즉시 신규 어록 왕관 장착
                   </button>
                   <button
                     onClick={() => setBossClearCelebration(null)}
                     className="flex-1 bg-indigo-800 hover:bg-indigo-700 text-white font-bold text-xs py-3 rounded-xl cursor-pointer transition-colors"
                   >
-                    수령 후 확인
+                    확인 및 복귀
                   </button>
                 </div>
               </div>
