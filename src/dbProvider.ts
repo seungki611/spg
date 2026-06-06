@@ -46,6 +46,15 @@ function setLocalItem<T>(key: string, value: T): void {
 export class DBProvider {
   // Is Supabase active
   static isSupabase() {
+    try {
+      // Support manual bypass to fallback mode when hitting email limits or confirmation restrictions
+      const forceLocal = localStorage.getItem('quest_force_local_mode');
+      if (forceLocal === 'true') {
+        return false;
+      }
+    } catch (e) {
+      // safe fallback if localStorage is blocked
+    }
     return isSupabaseConfigured && supabase !== null;
   }
 

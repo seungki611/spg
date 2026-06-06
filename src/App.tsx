@@ -111,7 +111,7 @@ export default function App() {
 
   // Custom Toast State (replaces iframe-incompatible window.alert)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
-  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const toastTimeoutRef = useRef<any>(null);
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     if (toastTimeoutRef.current) {
       clearTimeout(toastTimeoutRef.current);
@@ -123,7 +123,7 @@ export default function App() {
   };
 
   // Timer tick reference
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const intervalRef = useRef<any>(null);
 
   // Load active connection configuration on startup
   useEffect(() => {
@@ -201,12 +201,13 @@ export default function App() {
     const qualifyingDates = new Set<string>();
 
     studySessions.forEach(s => {
-      const duration = s.duration_minutes;
+      if (!s || !s.started_at) return;
+      const duration = s.duration_minutes || 0;
       const startedTime = new Date(s.started_at).getTime();
 
       totalMin += duration;
 
-      const dateStr = s.started_at.split('T')[0];
+      const dateStr = s.started_at.split('T')[0] || '1970-01-01';
       minutesPerDate[dateStr] = (minutesPerDate[dateStr] || 0) + duration;
 
       if (minutesPerDate[dateStr] >= 10) {
@@ -363,9 +364,18 @@ export default function App() {
 
     try {
       setLoading(true);
-      // Run signup
+      // Force Local Storage fallback for guest mode so it never hits Supabase signUp rate-limits or confirmation blocks!
+      try {
+        localStorage.setItem('quest_force_local_mode', 'true');
+      } catch (e) {
+        console.warn('localStorage not available', e);
+      }
+      setIsSupabaseMode(false);
+
+      // Run signup in local mode
       const user = await DBProvider.signUp(guestEmail, guestPassword, guestNickname);
       setCurrentUser(user);
+      showToast('💾 쾌적한 로컬 체험 세션으로 모험을 성공적으로 가입 개시했습니다!', 'success');
     } catch (err: any) {
       setAuthError('빠른 체험 세션 가입 실패: ' + err.message);
     } finally {
@@ -621,6 +631,9 @@ export default function App() {
 
   // Formatting stopwatch HH:MM:SS
   const formatTime = (totalSecs: number) => {
+    if (typeof totalSecs !== 'number' || isNaN(totalSecs) || totalSecs < 0) {
+      return '00:00:00';
+    }
     const hrs = Math.floor(totalSecs / 3600);
     const mins = Math.floor((totalSecs % 3600) / 60);
     const secs = totalSecs % 60;
@@ -783,8 +796,51 @@ export default function App() {
               </div>
 
               {authError && (
-                <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl p-3 mb-5 font-medium">
-                  ⚠️ {authError}
+                <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl p-4 mb-5 font-medium space-y-3">
+                  <div>⚠️ {authError}</div>
+                  
+                  {/* Smart bypass helper for email confirmation and rate limits */}
+                  {(authError.toLowerCase().includes('limit') || 
+                    authError.toLowerCase().includes('confirm') || 
+                    authError.toLowerCase().includes('실패') || 
+                    authError.toLowerCase().includes('not confirmed') ||
+                    true) && (
+                    <div className="pt-2.5 border-t border-red-500/20 text-slate-300 font-normal leading-relaxed text-[11px] space-y-2">
+                      <p>
+                        💡 <strong>Supabase 서버 한도 초과 또는 이메일 인증(Confirm) 대기 현상입니다.</strong>
+                        <br />
+                        서버 가입을 건너뛰고 내 브라우저 저장소([로컬전용 모드])를 이용하면 즉석에서 막힘없이 모험가 계정을 생성하고 모든 타이머, 공부 보상 코인 퀘스트, 도감을 즐기실 수 있습니다!
+                      </p>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            localStorage.setItem('quest_force_local_mode', 'true');
+                            setIsSupabaseMode(false);
+                            setAuthError(null);
+                            
+                            // Immediately create local storage-based randomized guest
+                            const guestRand = Math.floor(100 + Math.random() * 900);
+                            const guestEmail = `local_user_${guestRand}@coinquest.local`;
+                            const guestPassword = `pwd_${guestRand}`;
+                            const guestNickname = `로컬모험가 ${guestRand}`;
+                            
+                            setLoading(true);
+                            const user = await DBProvider.signUp(guestEmail, guestPassword, guestNickname);
+                            setCurrentUser(user);
+                            showToast('💾 즉시 로컬 단독 기억 모드로 전환 및 로그인이 완료되었습니다!', 'success');
+                          } catch (e: any) {
+                            setAuthError('로컬 모드 가입 전환 중 오류: ' + e.message);
+                          } finally {
+                            setLoading(false);
+                          }
+                        }}
+                        className="w-full bg-gradient-to-r from-amber-600 to-indigo-600 hover:from-amber-500 hover:to-indigo-500 text-white font-black py-2 px-3 rounded-lg cursor-pointer transition-all active:scale-[0.98] shadow-md text-center block text-[11px]"
+                      >
+                        ⚙️ 안전한 로컬 저장소 모드로 즉시 강제 전환 + 바로 로그인 시작하기
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -952,26 +1008,26 @@ export default function App() {
                   >
                     
                     {/* Bento Card 2: Main Timer (Stopwatch Panel) */}
-                    <div className="col-span-12 lg:col-span-6 bg-gradient-to-br from-indigo-600 to-blue-700 rounded-[2.5rem] p-6 sm:p-8 flex flex-col items-center justify-center relative overflow-hidden shadow-2xl border border-white/10">
+                    <div className="col-span-12 lg:col-span-6 bg-slate-900/60 border-2 border-slate-700/80 rounded-[2.5rem] p-6 sm:p-8 flex flex-col items-center justify-center relative overflow-hidden shadow-2xl backdrop-blur-md">
                       
                       {/* Active session indicators */}
-                      <div className="absolute top-6 left-6 flex items-center gap-2 bg-black/20 px-4 py-2 rounded-full border border-white/5">
-                        <span className={`w-2 h-2 rounded-full ${isTimerRunning ? 'bg-red-400 animate-pulse' : 'bg-slate-400'}`}>●</span>
-                        <span className="text-[10px] font-black tracking-widest uppercase text-white font-mono">
+                      <div className="absolute top-6 left-6 flex items-center gap-2 bg-slate-950/60 px-4 py-2 rounded-full border border-slate-800">
+                        <span className={`w-2 h-2 rounded-full ${isTimerRunning ? 'bg-red-500 animate-pulse' : 'bg-slate-500'}`}>●</span>
+                        <span className="text-[10px] font-black tracking-widest uppercase text-slate-300 font-mono">
                           {isTimerRunning ? '⚔️ 공부 퀘스트 수행 중' : '💤 거점 대기 상태'}
                         </span>
                       </div>
 
-                      <div className="absolute top-6 right-6 flex items-center gap-1.5 bg-black/10 px-3 py-1.5 rounded-full border border-white/5 text-[10px] text-indigo-200 font-mono">
+                      <div className="absolute top-6 right-6 flex items-center gap-1.5 bg-slate-950/60 px-3 py-1.5 rounded-full border border-slate-800 text-[10px] text-slate-400 font-mono">
                         {isTimerRunning ? (cheatSpeedEnabled ? '⏩ 60배속 비상 게이지 가속' : '⏱️ 실시간 시간 축적') : '출격 대기'}
                       </div>
 
                       {/* Giant digital timer display */}
-                      <div className="text-[5.5rem] sm:text-[7rem] md:text-[8rem] font-black leading-none tracking-tighter text-white drop-shadow-[0_10px_15px_rgba(0,0,0,0.3)] my-12 font-mono flex items-center justify-center selection:bg-indigo-400">
+                      <div className="text-[5.5rem] sm:text-[7rem] md:text-[8rem] font-black leading-none tracking-tighter text-indigo-400 drop-shadow-[0_10px_15px_rgba(0,0,0,0.5)] my-12 font-mono flex items-center justify-center selection:bg-indigo-600/55">
                         {isTimerRunning ? formatTime(elapsedSeconds) : '00:00:00'}
                       </div>
 
-                      <p className="text-blue-100 font-bold mb-8 uppercase tracking-[0.25em] text-xs opacity-80 text-center font-display">
+                      <p className="text-slate-400 font-bold mb-8 uppercase tracking-[0.25em] text-xs opacity-90 text-center font-display">
                         수행 중인 집중 토벌 시간
                       </p>
 
@@ -980,16 +1036,16 @@ export default function App() {
                           <button
                             type="button"
                             onClick={handleStartTimer}
-                            className="flex-1 bg-white text-indigo-700 h-16 sm:h-20 rounded-2xl font-black text-sm sm:text-lg shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer border border-transparent hover:bg-slate-50"
+                            className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white h-16 sm:h-20 rounded-2xl font-black text-sm sm:text-lg shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer border border-transparent"
                           >
-                            <Play className="w-5 h-5 fill-current text-indigo-600" />
+                            <Play className="w-5 h-5 fill-current text-white" />
                             ⚔️ 집중 모험 개시
                           </button>
                         ) : (
                           <button
                             type="button"
                             onClick={handleStopTimer}
-                            className="flex-1 bg-red-500 text-white h-16 sm:h-20 rounded-2xl font-black text-sm sm:text-lg shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer border border-transparent hover:bg-red-650"
+                            className="flex-1 bg-rose-600 hover:bg-rose-500 text-white h-16 sm:h-20 rounded-2xl font-black text-sm sm:text-lg shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer border border-transparent animate-pulse"
                           >
                             <Square className="w-5 h-5 fill-current text-white" />
                             🛡️ 보스 공략 완료 (골드 획득)
@@ -997,7 +1053,7 @@ export default function App() {
                         )}
                       </div>
 
-                      <div className="absolute -bottom-24 -right-24 w-64 h-64 bg-white/5 rounded-full blur-3xl pointer-events-none" />
+                      <div className="absolute -bottom-24 -right-24 w-64 h-64 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none" />
                     </div>
 
                     {/* Bento Card 3: Today's Progress & Streak tracker */}
@@ -1689,13 +1745,58 @@ export default function App() {
                       </div>
 
                       {/* Account system notes */}
-                      <div className="mt-8 pt-4 border-t border-slate-850 text-xs text-slate-400 leading-relaxed font-mono">
-                        <div className="flex justify-between mb-1">
+                      <div className="mt-8 pt-4 border-t border-slate-850 text-xs text-slate-400 leading-relaxed font-mono space-y-2">
+                        <div className="flex justify-between items-center mb-1">
                           <span>인증 마법 유형:</span>
                           <span className={`font-bold ${isSupabaseMode ? 'text-emerald-400' : 'text-amber-400'}`}>
-                            {isSupabaseMode ? 'Supabase 천상 클라우드' : '로컬 모험 단독 기억'}
+                            {isSupabaseMode ? '🌐 Supabase 구름 연동' : '💾 로컬 컴퓨터 저장'}
                           </span>
                         </div>
+
+                        {/* Toggle switch inside profile */}
+                        <div className="pt-2">
+                          {isSupabaseMode ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                try {
+                                  localStorage.setItem('quest_force_local_mode', 'true');
+                                  setIsSupabaseMode(false);
+                                  showToast('💾 즉시 로컬 저장 단독 모드로 전환되었습니다! 이후 가입 및 저장은 모두 기기에 기록됩니다.', 'info');
+                                  checkUserSession();
+                                } catch (e) {
+                                  console.error(e);
+                                }
+                              }}
+                              className="w-full bg-slate-950 hover:bg-slate-850 border border-amber-500/30 text-amber-500 font-semibold text-[10px] py-1.5 px-2.5 rounded-lg cursor-pointer transition-all active:scale-95 text-center"
+                            >
+                              ⚙️ 로컬 브라우저 저장 모드로 강제 전환
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                try {
+                                  localStorage.removeItem('quest_force_local_mode');
+                                  const configActive = DBProvider.isSupabase();
+                                  setIsSupabaseMode(configActive);
+                                  if (configActive) {
+                                    showToast('🌐 구름 서버 연동(Supabase) 모드가 성공적으로 활성화되었습니다!', 'success');
+                                    checkUserSession();
+                                  } else {
+                                    showToast('⚙️ Supabase 환경 변수가 설정되어 있지 않아 서버 모드로 전환할 수 없습니다.', 'error');
+                                  }
+                                } catch (e) {
+                                  console.error(e);
+                                }
+                              }}
+                              className="w-full bg-slate-950 hover:bg-slate-850 border border-emerald-500/30 text-emerald-500 font-semibold text-[10px] py-1.5 px-2.5 rounded-lg cursor-pointer transition-all active:scale-95 text-center"
+                            >
+                              ⚙️ Supabase 구름 서버 연동 모드로 복귀 시도
+                            </button>
+                          )}
+                        </div>
+
                         <div className="flex justify-between">
                           <span>획득 전리품 왕관:</span>
                           <span className="font-bold text-indigo-400">{titles.length}개 전수 완료</span>
