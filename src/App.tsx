@@ -1,0 +1,1967 @@
+import { useState, useEffect, useMemo, useRef, FormEvent } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import {
+  Play,
+  Square,
+  Award,
+  Trophy,
+  History,
+  User,
+  LogOut,
+  Coins,
+  Flame,
+  Check,
+  CheckCircle2,
+  Lock,
+  Unlock,
+  Clock,
+  Sparkles,
+  Database,
+  BookOpen,
+  Info,
+  Sliders,
+  TrendingUp,
+  Shield,
+  Edit2,
+  Plus
+} from 'lucide-react';
+import { DBProvider } from './dbProvider';
+import { ACHIEVEMENTS, Profile, StudySession, UserAchievement, UserTitle, RankingItem } from './types';
+
+export default function App() {
+  // DB & Auth State
+  const [currentUser, setCurrentUser] = useState<any | null>(null);
+  const [currentProfile, setCurrentProfile] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [isSupabaseMode, setIsSupabaseMode] = useState(false);
+
+  // Tab State: 'dashboard' | 'history' | 'achievements' | 'rankings' | 'profile'
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'achievements' | 'rankings' | 'profile'>('dashboard');
+
+  // Timer State
+  const [isTimerRunning, setIsTimerRunning] = useState(false);
+  const [timerStartedAt, setTimerStartedAt] = useState<string | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // Test Utilities / Sandbox Mode Toggles
+  const [cheatSpeedEnabled, setCheatSpeedEnabled] = useState(false); // 1s real = 1m gamified
+  const [sandboxVisible, setSandboxVisible] = useState(true);
+
+  // Auth Inputs
+  const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [nickname, setNickname] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authSuccessMsg, setAuthSuccessMsg] = useState<string | null>(null);
+
+  // Data Collections
+  const [studySessions, setStudySessions] = useState<StudySession[]>([]);
+  const [achievements, setAchievements] = useState<UserAchievement[]>([]);
+  const [titles, setTitles] = useState<UserTitle[]>([]);
+  const [rankings, setRankings] = useState<RankingItem[]>([]);
+  const [rankingType, setRankingType] = useState<'today' | 'week' | 'total' | 'coins'>('today');
+
+  // Modals & Celebrations
+  const [sessionFinishReward, setSessionFinishReward] = useState<{
+    minutes: number;
+    baseCoins: number;
+    bonusCoins: number;
+    totalCoins: number;
+  } | null>(null);
+  const [bossClearCelebration, setBossClearCelebration] = useState<{
+    bossName: string;
+    achievementName: string;
+    coinsReward: number;
+    titleReward?: string;
+  } | null>(null);
+
+  // Profile Edit fields
+  const [newNickname, setNewNickname] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [sqlInstructionsOpen, setSqlInstructionsOpen] = useState(false);
+
+  // Timer tick reference
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Load active connection configuration on startup
+  useEffect(() => {
+    setIsSupabaseMode(DBProvider.isSupabase());
+    checkUserSession();
+  }, []);
+
+  // Sync state once user is logged in
+  useEffect(() => {
+    if (currentUser) {
+      loadUserData();
+      // Restore active study session if stored in client session
+      const savedTimer = localStorage.getItem('quest_timer_started_at');
+      if (savedTimer) {
+        setTimerStartedAt(savedTimer);
+        setIsTimerRunning(true);
+      }
+    }
+  }, [currentUser]);
+
+  // Rankings reload trigger
+  useEffect(() => {
+    if (currentUser && currentProfile) {
+      loadRankings();
+    }
+  }, [currentUser, currentProfile, rankingType, studySessions]);
+
+  // Live stopwatch update
+  useEffect(() => {
+    if (isTimerRunning && timerStartedAt) {
+      // Periodic timer ticking
+      intervalRef.current = setInterval(() => {
+        const startMs = new Date(timerStartedAt).getTime();
+        const nowMs = Date.now();
+        const diffSecs = Math.floor((nowMs - startMs) / 1000);
+
+        if (cheatSpeedEnabled) {
+          // Accelerated Cheat Mode: 1 real-time second contributes 1 gamified minute
+          setElapsedSeconds(diffSecs * 60);
+        } else {
+          setElapsedSeconds(diffSecs);
+        }
+      }, 1000);
+    } else {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      setElapsedSeconds(0);
+    }
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [isTimerRunning, timerStartedAt, cheatSpeedEnabled]);
+
+  // Compute stats dynamically from completed sessions
+  const stats = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+    // Start of this week (Monday)
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const startOfWeek = new Date(now.setDate(diff));
+    startOfWeek.setHours(0, 0, 0, 0);
+    const startOfWeekTime = startOfWeek.getTime();
+
+    // Start of this month
+    const startOfMonthTime = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+
+    let todayMin = 0;
+    let weekMin = 0;
+    let monthMin = 0;
+    let totalMin = 0;
+
+    const minutesPerDate: Record<string, number> = {};
+    const qualifyingDates = new Set<string>();
+
+    studySessions.forEach(s => {
+      const duration = s.duration_minutes;
+      const startedTime = new Date(s.started_at).getTime();
+
+      totalMin += duration;
+
+      const dateStr = s.started_at.split('T')[0];
+      minutesPerDate[dateStr] = (minutesPerDate[dateStr] || 0) + duration;
+
+      if (minutesPerDate[dateStr] >= 10) {
+        qualifyingDates.add(dateStr);
+      }
+
+      if (startedTime >= startOfToday) {
+        todayMin += duration;
+      }
+      if (startedTime >= startOfWeekTime) {
+        weekMin += duration;
+      }
+      if (startedTime >= startOfMonthTime) {
+        monthMin += duration;
+      }
+    });
+
+    // Calculate Consecutive Streak (Backwards traversal)
+    let streak = 0;
+    const todayKey = new Date().toISOString().split('T')[0];
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayKey = yesterday.toISOString().split('T')[0];
+
+    // If studied today or yesterday, streak is currently active
+    const hasStudiedToday = (minutesPerDate[todayKey] || 0) >= 10;
+    const hasStudiedYesterday = (minutesPerDate[yesterdayKey] || 0) >= 10;
+
+    if (hasStudiedToday || hasStudiedYesterday) {
+      let checkDate = hasStudiedToday ? new Date() : yesterday;
+      while (true) {
+        const checkKey = checkDate.toISOString().split('T')[0];
+        if (qualifyingDates.has(checkKey)) {
+          streak++;
+          // Step back 1 day
+          checkDate.setDate(checkDate.getDate() - 1);
+        } else {
+          break;
+        }
+      }
+    }
+
+    return {
+      todayPercent: Math.min(100, Math.floor(((minutesPerDate[todayKey] || 0) / 10) * 100)),
+      todayMin,
+      weekMin,
+      monthMin,
+      totalMin,
+      streak,
+      todayStudied: hasStudiedToday,
+      todayTotalMinutes: minutesPerDate[todayKey] || 0
+    };
+  }, [studySessions]);
+
+  // Find active boss quest goal for Dashboard Bento display
+  const currentBoss = useMemo(() => {
+    const unlockedKeys = new Set(achievements.map(a => a.achievement_key));
+    const nextBoss = ACHIEVEMENTS.find(ach => !unlockedKeys.has(ach.key));
+    return nextBoss || ACHIEVEMENTS[ACHIEVEMENTS.length - 1];
+  }, [achievements]);
+
+  // Auth Functions
+  const checkUserSession = async () => {
+    try {
+      setLoading(true);
+      const user = await DBProvider.getCurrentUser();
+      setCurrentUser(user);
+    } catch (err) {
+      console.error('Session retrieval failed', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadUserData = async () => {
+    if (!currentUser) return;
+    try {
+      const profile = await DBProvider.getProfile(currentUser.id);
+      setCurrentProfile(profile);
+      if (profile) {
+        setNewNickname(profile.nickname);
+      }
+
+      const sessions = await DBProvider.getStudySessions(currentUser.id);
+      setStudySessions(sessions);
+
+      const achieved = await DBProvider.getAchievements(currentUser.id);
+      setAchievements(achieved);
+
+      const userTitles = await DBProvider.getTitles(currentUser.id);
+      setTitles(userTitles);
+
+    } catch (err) {
+      console.error('Error loading user tables:', err);
+    }
+  };
+
+  const loadRankings = async () => {
+    if (!currentUser || !currentProfile) return;
+    try {
+      const rankingList = await DBProvider.getRankings(
+        currentUser.id,
+        currentProfile,
+        stats.todayMin,
+        stats.weekMin,
+        stats.totalMin,
+        rankingType
+      );
+      setRankings(rankingList);
+    } catch (err) {
+      console.error('Leaderboard query failing:', err);
+    }
+  };
+
+  const handleAuthSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthSuccessMsg(null);
+
+    if (!email || !password) {
+      setAuthError('이메일과 비밀번호를 입력해주세요.');
+      return;
+    }
+
+    if (authTab === 'register' && !nickname.trim()) {
+      setAuthError('닉네임을 설정해 주세요.');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      if (authTab === 'register') {
+        const user = await DBProvider.signUp(email, password, nickname.trim());
+        setAuthSuccessMsg('회원가입 완료! 자동 환영 로그인을 시도합니다.');
+        setCurrentUser(user);
+      } else {
+        const user = await DBProvider.signIn(email, password);
+        setCurrentUser(user);
+      }
+    } catch (err: any) {
+      setAuthError(err.message || '인증 처리에 실패하였습니다.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // One-click quick guest onboarding
+  const handleQuickGuestOnboarding = async () => {
+    setAuthError(null);
+    const guestRand = Math.floor(100 + Math.random() * 900);
+    const guestEmail = `guest_${guestRand}@coinquest.local`;
+    const guestPassword = `guestpwd_${guestRand}`;
+    const guestNickname = `초보도전자 ${guestRand}`;
+
+    try {
+      setLoading(true);
+      // Run signup
+      const user = await DBProvider.signUp(guestEmail, guestPassword, guestNickname);
+      setCurrentUser(user);
+    } catch (err: any) {
+      setAuthError('빠른 체험 세션 가입 실패: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      setLoading(true);
+      // Terminate running timer first
+      setIsTimerRunning(false);
+      setTimerStartedAt(null);
+      localStorage.removeItem('quest_timer_started_at');
+
+      await DBProvider.signOut();
+      setCurrentUser(null);
+      setCurrentProfile(null);
+      setStudySessions([]);
+      setAchievements([]);
+      setTitles([]);
+      setActiveTab('dashboard');
+    } catch (err) {
+      console.error('Logout error', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Timer Core Actions
+  const handleStartTimer = () => {
+    const startedStr = new Date().toISOString();
+    setTimerStartedAt(startedStr);
+    setIsTimerRunning(true);
+    localStorage.setItem('quest_timer_started_at', startedStr);
+  };
+
+  const handleStopTimer = async () => {
+    if (!timerStartedAt || !currentUser) return;
+
+    // Read end time
+    const endedStr = new Date().toISOString();
+    const runtimeSec = elapsedSeconds;
+    const runtimeMin = Math.max(1, Math.floor(runtimeSec / 60)); // Standard min 1
+
+    // Enforce 1 minute minimum threshold for storage
+    if (runtimeSec < 60) {
+      alert('너무 짧은 기록은 저장되지 않습니다. 최소 1분 이상 공부해야 코인이 지급됩니다! (샌드박스 배속 또는 수동 입력을 이용하면 고속 테스트가 가능합니다)');
+      setIsTimerRunning(false);
+      setTimerStartedAt(null);
+      localStorage.removeItem('quest_timer_started_at');
+      return;
+    }
+
+    try {
+      setIsTimerRunning(false);
+      setTimerStartedAt(null);
+      localStorage.removeItem('quest_timer_started_at');
+      setLoading(true);
+
+      // Reward Calculations
+      // 1 minute = 1 Coin
+      const baseCoins = runtimeMin;
+      let bonusCoins = 0;
+      if (runtimeMin >= 120) {
+        bonusCoins = 80;
+      } else if (runtimeMin >= 60) {
+        bonusCoins = 30;
+      } else if (runtimeMin >= 30) {
+        bonusCoins = 10;
+      }
+
+      const totalEarned = baseCoins + bonusCoins;
+
+      // Persist to DB
+      await DBProvider.addStudySession(
+        currentUser.id,
+        timerStartedAt,
+        endedStr,
+        runtimeMin,
+        totalEarned
+      );
+
+      // Show reward breakout modal
+      setSessionFinishReward({
+        minutes: runtimeMin,
+        baseCoins,
+        bonusCoins,
+        totalCoins: totalEarned
+      });
+
+      // Reload profile & stats and trigger achievements check
+      await triggerSyncAndAchievementsCheck(runtimeMin);
+
+    } catch (err) {
+      console.error('Stop timer fail:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Achievement Check & Award Trigger
+  const triggerSyncAndAchievementsCheck = async (addedMin: number = 0) => {
+    if (!currentUser) return;
+
+    try {
+      // 1. Reload general tables
+      const updatedProfile = await DBProvider.getProfile(currentUser.id);
+      setCurrentProfile(updatedProfile);
+
+      const updatedSessions = await DBProvider.getStudySessions(currentUser.id);
+      setStudySessions(updatedSessions);
+
+      // Calculate total accumulative hours
+      const totalAccumulatedMinutes = updatedSessions.reduce((sum, s) => sum + s.duration_minutes, 0);
+      const totalAccumulatedHours = totalAccumulatedMinutes / 60;
+
+      // 2. Fetch already unlocked achievements to bypass duplicates
+      const currentAchievements = await DBProvider.getAchievements(currentUser.id);
+      setAchievements(currentAchievements);
+
+      const unlockedKeys = new Set(currentAchievements.map(a => a.achievement_key));
+
+      // 3. Scan Achievements definitions and unlock if eligible
+      for (const ach of ACHIEVEMENTS) {
+        if (unlockedKeys.has(ach.key)) continue;
+
+        let eligible = false;
+        if (ach.key === 'first_study') {
+          eligible = updatedSessions.length >= 1;
+        } else {
+          eligible = totalAccumulatedHours >= ach.requiredHours;
+        }
+
+        if (eligible) {
+          // Perform unlock logic
+          const didUnlock = await DBProvider.unlockAchievement(
+            currentUser.id,
+            ach.key,
+            ach.rewardCoins,
+            ach.rewardTitle
+          );
+
+          if (didUnlock) {
+            // Trigger beautiful celebration popup
+            setBossClearCelebration({
+              bossName: ach.bossName,
+              achievementName: ach.name,
+              coinsReward: ach.rewardCoins,
+              titleReward: ach.rewardTitle
+            });
+            // Break loop to show one celebration modal at a time
+            break;
+          }
+        }
+      }
+
+      // Reload collection listings
+      const updatedTitles = await DBProvider.getTitles(currentUser.id);
+      setTitles(updatedTitles);
+
+      const reProfile = await DBProvider.getProfile(currentUser.id);
+      setCurrentProfile(reProfile);
+
+    } catch (err) {
+      console.error('Error in achievements processing:', err);
+    }
+  };
+
+  // Sandbox cheat loaders to ease validation
+  const injectMockStudySession = async (minutes: number) => {
+    if (!currentUser) return;
+    try {
+      setLoading(true);
+      const now = new Date();
+      const past = new Date(now.getTime() - minutes * 60 * 1000);
+
+      // Calculate coins
+      const baseCoins = minutes;
+      let bonusCoins = 0;
+      if (minutes >= 120) bonusCoins = 80;
+      else if (minutes >= 60) bonusCoins = 30;
+      else if (minutes >= 30) bonusCoins = 10;
+      const earned = baseCoins + bonusCoins;
+
+      await DBProvider.addStudySession(
+        currentUser.id,
+        past.toISOString(),
+        now.toISOString(),
+        minutes,
+        earned
+      );
+
+      setSessionFinishReward({
+        minutes,
+        baseCoins,
+        bonusCoins,
+        totalCoins: earned
+      });
+
+      await triggerSyncAndAchievementsCheck(minutes);
+    } catch (err) {
+      console.error('Sandbox inject study fail:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCoinsCheat = async () => {
+    if (!currentUser || !currentProfile) return;
+    try {
+      setLoading(true);
+      const updatedCoins = (currentProfile.coins || 0) + 1000;
+      const upProfile = await DBProvider.updateProfile(currentUser.id, { coins: updatedCoins });
+      setCurrentProfile(upProfile);
+    } catch (err) {
+      console.error('Sandbox coin cheat failure:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Equip unlocked title
+  const handleEquipTitle = async (title: string) => {
+    if (!currentUser || !currentProfile) return;
+    try {
+      setProfileSaving(true);
+      const upProfile = await DBProvider.updateProfile(currentUser.id, { selected_title: title });
+      setCurrentProfile(upProfile);
+    } catch (err) {
+      console.error('Title equip failure:', err);
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  // Change Profile Nickname
+  const handleUpdateNicknameSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!currentUser || !currentProfile || !newNickname.trim()) return;
+
+    try {
+      setProfileSaving(true);
+      const updated = await DBProvider.updateProfile(currentUser.id, { nickname: newNickname.trim() });
+      setCurrentProfile(updated);
+      alert('닉네임이 성공적으로 변경되었습니다!');
+    } catch (err: any) {
+      alert('닉네임 변경에 실패하였습니다: ' + err.message);
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  // Formatting stopwatch HH:MM:SS
+  const formatTime = (totalSecs: number) => {
+    const hrs = Math.floor(totalSecs / 3600);
+    const mins = Math.floor((totalSecs % 3600) / 60);
+    const secs = totalSecs % 60;
+
+    const hrsStr = String(hrs).padStart(2, '0');
+    const minsStr = String(mins).padStart(2, '0');
+    const secsStr = String(secs).padStart(2, '0');
+
+    return `${hrsStr}:${minsStr}:${secsStr}`;
+  };
+
+  // Translate minutes into human-readable hours & minutes
+  const formatMinutesReadable = (totalMins: number) => {
+    const hrs = Math.floor(totalMins / 60);
+    const mins = totalMins % 60;
+    if (hrs === 0) return `${mins}분`;
+    return `${hrs}시간 ${mins}분`;
+  };
+
+  return (
+    <div className="min-h-screen bg-[#0f172a] text-slate-100 flex flex-col font-sans transition-all selection:bg-amber-400 selection:text-slate-900">
+      
+      {/* Dynamic database connectivity banner */}
+      <div className="bg-[#1e293b]/70 border-b border-slate-700/80 text-xs text-slate-400 px-4 py-2.5 flex flex-wrap justify-between items-center gap-2 backdrop-blur-md">
+        <div className="flex items-center gap-2">
+          {isSupabaseMode ? (
+            <span className="flex items-center gap-1 text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+              <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping" />
+              🟢 Supabase 실시간 연동 중
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-amber-400 font-semibold bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+              <span className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
+              🟡 로컬 브라우저 저장소 연동 중 (샌드박스 모드)
+            </span>
+          )}
+          <span className="hidden md:inline">|</span>
+          <span className="hidden md:inline">Supabase 연결 키는 .env 파일에서 구성할 수 있습니다.</span>
+        </div>
+        <button
+          onClick={() => setSqlInstructionsOpen(!sqlInstructionsOpen)}
+          className="text-amber-400 hover:text-amber-300 flex items-center gap-1 transition-colors underline cursor-pointer"
+        >
+          <Database className="w-3 h-3" />
+          SQL DB 생성 스크립트 보기
+        </button>
+      </div>
+
+      {/* SQL Script help overlay */}
+      <AnimatePresence>
+        {sqlInstructionsOpen && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="bg-slate-900/90 border-b border-amber-500/20 px-6 py-4 text-xs font-mono text-slate-300 leading-relaxed max-w-7xl mx-auto w-full"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-amber-400 font-bold font-display text-sm">💾 Supabase SQL Editor 명령어 복사</span>
+              <button
+                onClick={() => setSqlInstructionsOpen(false)}
+                className="text-slate-400 hover:text-slate-200 px-2 py-0.5 bg-slate-800 rounded border border-slate-700 cursor-pointer"
+              >
+                닫기
+              </button>
+            </div>
+            <p className="text-slate-400 mb-3">Supabase SQL Editor에 아래 스크립트를 붙여넣어 테이블과 RLS(행 보안 정책)를 간편하게 구성하세요:</p>
+            <pre className="bg-slate-950 p-3 rounded border border-slate-800 overflow-x-auto text-[11px] text-emerald-400 shadow-inner max-h-52">
+{`-- profiles 테이블
+create table public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  nickname text not null,
+  coins integer default 0,
+  selected_title text default '첫걸음 학습자',
+  created_at timestamp with time zone default now()
+);
+
+-- study_sessions 테이블
+create table public.study_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
+  started_at timestamp with time zone not null,
+  ended_at timestamp with time zone not null,
+  duration_minutes integer not null,
+  earned_coins integer not null,
+  created_at timestamp with time zone default now()
+);
+
+-- user_achievements 테이블
+create table public.user_achievements (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
+  achievement_key text not null,
+  achieved_at timestamp with time zone default now(),
+  unique(user_id, achievement_key)
+);
+
+-- user_titles 테이블
+create table public.user_titles (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references auth.users(id) on delete cascade,
+  title text not null,
+  created_at timestamp with time zone default now(),
+  unique(user_id, title)
+);
+
+-- RLS 활성화 단계
+alter table public.profiles enable row level security;
+alter table public.study_sessions enable row level security;
+alter table public.user_achievements enable row level security;
+alter table public.user_titles enable row level security;
+
+-- RLS 보안 정책 가이드라인
+create policy "사용자는 본인의 profile만 조회/수정 가능" on public.profiles for all using (auth.uid() = id);
+create policy "사용자는 본인의 study_sessions만 조회/생성 가능" on public.study_sessions for all using (auth.uid() = user_id);
+create policy "사용자는 본인의 achievements만 조회 가능" on public.user_achievements for all using (auth.uid() = user_id);
+create policy "사용자는 본인의 titles만 조회 가능" on public.user_titles for all using (auth.uid() = user_id);
+create policy "전체 랭킹 공유를 위한 profiles 공개 조회권한" on public.profiles for select using (true);
+`}
+            </pre>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Main Header navigation */}
+      <header className="bg-[#1e293b]/80 border-b border-slate-700/80 sticky top-0 z-40 backdrop-blur-md shadow-lg">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-12 flex items-center justify-between">
+          
+          {/* Logo with swords and coins */}
+          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveTab('dashboard')}>
+            <div className="bg-amber-500 text-slate-950 p-2 rounded-lg glow-gold animate-pulse">
+              <Coins className="w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="text-lg font-extrabold tracking-tight font-display text-white">
+                STUDY <span className="text-amber-400">COIN</span> QUEST
+              </h1>
+              <p className="text-[10px] text-slate-400 -mt-0.5 tracking-wider font-mono">GAME-FI STUDY TIMER</p>
+            </div>
+          </div>
+
+          {/* User state or logs */}
+          {currentUser && currentProfile && (
+            <div className="flex items-center gap-3 sm:gap-6">
+              
+              {/* Character miniature info */}
+              <div className="hidden sm:flex flex-col text-right">
+                <span className="text-xs font-semibold text-slate-200 flex items-center justify-end gap-1.5">
+                  <span className="bg-indigo-500/10 text-indigo-300 font-mono text-[9px] px-1.5 py-0.5 rounded border border-indigo-400/20">
+                    {currentProfile.selected_title || '첫걸음 학습자'}
+                  </span>
+                  {currentProfile.nickname} 님
+                </span>
+                <span className="text-[10px] font-mono text-slate-400">학습 레벨 게이머</span>
+              </div>
+
+              {/* Coins counter widget */}
+              <div className="bg-slate-950 border border-slate-700/80 bg-opacity-40 rounded-full py-1 px-3 flex items-center gap-1.5 glow-gold">
+                <Coins className="w-4 h-4 text-amber-400 animate-spin" style={{ animationDuration: '3s' }} />
+                <span className="text-amber-300 font-mono text-xs font-bold">
+                  {currentProfile.coins.toLocaleString()}
+                </span>
+                <span className="text-amber-400/80 text-[10px] font-bold">🪙</span>
+              </div>
+
+              {/* Logout Button */}
+              <button
+                onClick={handleLogout}
+                title="로그아웃"
+                className="text-slate-400 hover:text-red-400 p-1.5 hover:bg-slate-800 rounded-lg transition-all cursor-pointer"
+              >
+                <LogOut className="w-4.5 h-4.5" />
+              </button>
+
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Main Container workspace */}
+      <main className="flex-grow max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col gap-6">
+        
+        {loading && (
+          <div className="flex-grow flex flex-col items-center justify-center py-20 min-h-[400px]">
+            <div className="w-12 h-12 border-4 border-amber-500 border-t-transparent rounded-full animate-spin mb-4" />
+            <p className="text-slate-400 text-sm font-mono animate-pulse">모듈 데이터를 동기화하는 중...</p>
+          </div>
+        )}
+
+        {!loading && !currentUser && (
+          /* Authentication Screen (Unauthenticated) */
+          <div className="max-w-md w-full mx-auto my-auto flex flex-col py-10">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ duration: 0.3 }}
+              className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden p-6 sm:p-8 shadow-2xl relative"
+            >
+              <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-amber-500 via-orange-500 to-indigo-600" />
+              
+              <div className="text-center mb-6">
+                <div className="inline-flex bg-amber-500/10 p-4 rounded-full text-amber-400 mb-3 border border-amber-500/20">
+                  <Trophy className="w-8 h-8" />
+                </div>
+                <h2 className="text-xl font-bold font-display text-white">스터디 코인 퀘스트 입장하기</h2>
+                <p className="text-xs text-slate-400 mt-1">
+                  공부 시간이 코인이 되고 업적이 되는 게임 학습 플랫폼에 가입하세요.
+                </p>
+              </div>
+
+              {/* Login/Signup Tabs */}
+              <div className="flex bg-slate-950 p-1 rounded-xl mb-6 border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => { setAuthTab('login'); setAuthError(null); }}
+                  className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+                    authTab === 'login' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  로그인
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setAuthTab('register'); setAuthError(null); }}
+                  className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+                    authTab === 'register' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  회원가입
+                </button>
+              </div>
+
+              {authError && (
+                <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl p-3 mb-5 font-medium">
+                  ⚠️ {authError}
+                </div>
+              )}
+
+              {authSuccessMsg && (
+                <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-xl p-3 mb-5 font-medium">
+                  🎉 {authSuccessMsg}
+                </div>
+              )}
+
+              {/* Standard Auth Form */}
+              <form onSubmit={handleAuthSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">이메일 주소</label>
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="student@example.com"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">비밀번호</label>
+                  <input
+                    type="password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                </div>
+
+                {authTab === 'register' && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider font-display">사용할 닉네임</label>
+                    <input
+                      type="text"
+                      required
+                      value={nickname}
+                      onChange={(e) => setNickname(e.target.value)}
+                      placeholder="예: 독서실정복자"
+                      maxLength={15}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full mt-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm py-3 rounded-xl cursor-pointer transition-colors shadow-lg active:scale-[0.99] duration-150"
+                >
+                  {authTab === 'login' ? '로그인 피어 입장기' : '모험 정보 생성 및 가입'}
+                </button>
+              </form>
+
+              {/* Quick Guest Experience Onboarding helper */}
+              <div className="mt-6 pt-6 border-t border-slate-800">
+                <p className="text-[11px] text-slate-500 text-center mb-3">
+                  계정 없이 즉석에서 기능을 탐험하고 싶으신가요?
+                </p>
+                <button
+                  type="button"
+                  onClick={handleQuickGuestOnboarding}
+                  className="w-full flex items-center justify-center gap-1.5 bg-slate-950 hover:bg-slate-850 text-amber-400 hover:text-amber-300 border border-amber-500/20 py-2.5 px-4 rounded-xl text-xs font-bold cursor-pointer transition-all shadow-md"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  💡 1초 빠른 게스트 로그인 (로컬 테스트전용)
+                </button>
+              </div>
+
+            </motion.div>
+          </div>
+        )}
+
+        {!loading && currentUser && currentProfile && (
+          /* Main Application Dashboard Panel */
+          <div className="flex flex-col gap-6">
+            
+            {/* Nav Menu Tabs bar */}
+            <div className="flex select-none bg-[#1e293b]/55 border border-slate-700/80 p-1.5 rounded-2xl justify-between sm:justify-start gap-1 overflow-x-auto shadow-lg backdrop-blur-md">
+              <button
+                onClick={() => setActiveTab('dashboard')}
+                className={`flex items-center gap-2 py-2.5 px-3.5 sm:px-5 rounded-xl text-xs font-bold font-display tracking-wide transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'dashboard'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Clock className="w-4 h-4" />
+                타이머 & 대시보드
+              </button>
+
+              <button
+                onClick={() => setActiveTab('history')}
+                className={`flex items-center gap-2 py-2.5 px-3.5 sm:px-5 rounded-xl text-xs font-bold font-display tracking-wide transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'history'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <History className="w-4 h-4" />
+                공부 기록 Logs
+              </button>
+
+              <button
+                onClick={() => setActiveTab('achievements')}
+                className={`flex items-center gap-2 py-2.5 px-3.5 sm:px-5 rounded-xl text-xs font-bold font-display tracking-wide transition-all cursor-pointer relative whitespace-nowrap ${
+                  activeTab === 'achievements'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Award className="w-4 h-4" />
+                보스 레이드 업적
+                {achievements.length < ACHIEVEMENTS.length && (
+                  <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+                  </span>
+                )}
+              </button>
+
+              <button
+                onClick={() => setActiveTab('rankings')}
+                className={`flex items-center gap-2 py-2.5 px-3.5 sm:px-5 rounded-xl text-xs font-bold font-display tracking-wide transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'rankings'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Trophy className="w-4 h-4" />
+                전체 랭킹 보드
+              </button>
+
+              <button
+                onClick={() => setActiveTab('profile')}
+                className={`flex items-center gap-2 py-2.5 px-3.5 sm:px-5 rounded-xl text-xs font-bold font-display tracking-wide transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'profile'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <User className="w-4 h-4" />
+                프로필 설정칭호
+              </button>
+            </div>
+
+            {/* Container for Tab panels */}
+            <div className="min-h-[450px]">
+              <AnimatePresence mode="wait">
+                
+                {/* 1. DASHBOARD PANEL */}
+                {activeTab === 'dashboard' && (
+                  <motion.div
+                    key="dashboard"
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    transition={{ duration: 0.2 }}
+                    className="grid grid-cols-1 md:grid-cols-12 gap-6 items-stretch"
+                  >
+                    
+                    {/* Bento Card 2: Main Timer (Stopwatch Panel) */}
+                    <div className="col-span-12 lg:col-span-6 bg-gradient-to-br from-indigo-600 to-blue-705 rounded-[2.5rem] p-6 sm:p-8 flex flex-col items-center justify-center relative overflow-hidden shadow-2xl border border-white/10">
+                      
+                      {/* Active session indicators */}
+                      <div className="absolute top-6 left-6 flex items-center gap-2 bg-black/20 px-4 py-2 rounded-full border border-white/5">
+                        <span className={`w-2 h-2 rounded-full ${isTimerRunning ? 'bg-red-400 animate-pulse' : 'bg-slate-400'}`}>●</span>
+                        <span className="text-[10px] font-black tracking-widest uppercase text-white font-mono">
+                          {isTimerRunning ? 'Session Active' : 'Session Ready'}
+                        </span>
+                      </div>
+
+                      <div className="absolute top-6 right-6 flex items-center gap-1.5 bg-black/10 px-3 py-1.5 rounded-full border border-white/5 text-[10px] text-indigo-200 font-mono">
+                        {isTimerRunning ? (cheatSpeedEnabled ? '⏩ 60배속 가속 중' : '⏱️ 실시간 계산') : '대기 모드'}
+                      </div>
+
+                      {/* Giant digital timer display */}
+                      <div className="text-[5.5rem] sm:text-[7rem] md:text-[8rem] font-black leading-none tracking-tighter text-white drop-shadow-[0_10px_15px_rgba(0,0,0,0.3)] my-12 font-mono flex items-center justify-center selection:bg-indigo-400">
+                        {isTimerRunning ? formatTime(elapsedSeconds) : '00:00:00'}
+                      </div>
+
+                      <p className="text-blue-100 font-bold mb-8 uppercase tracking-[0.25em] text-xs opacity-80 text-center font-display">
+                        YOUR ACTIVE FOCUSING QUEST TIME
+                      </p>
+
+                      <div className="flex gap-4 w-full max-w-sm">
+                        {!isTimerRunning ? (
+                          <button
+                            type="button"
+                            onClick={handleStartTimer}
+                            className="flex-1 bg-white text-indigo-700 h-16 sm:h-20 rounded-2xl font-black text-sm sm:text-lg shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer border border-transparent hover:bg-slate-50"
+                          >
+                            <Play className="w-5 h-5 fill-current text-indigo-600" />
+                            START SESSION
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleStopTimer}
+                            className="flex-1 bg-red-500 text-white h-16 sm:h-20 rounded-2xl font-black text-sm sm:text-lg shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer border border-transparent hover:bg-red-650"
+                          >
+                            <Square className="w-5 h-5 fill-current text-white" />
+                            FINISH SESSION
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="absolute -bottom-24 -right-24 w-64 h-64 bg-white/5 rounded-full blur-3xl pointer-events-none" />
+                    </div>
+
+                    {/* Bento Card 3: Today's Progress & Streak tracker */}
+                    <div className="col-span-12 md:col-span-8 lg:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-[2rem] p-6 flex flex-col justify-between shadow-xl relative overflow-hidden backdrop-blur-md">
+                      <div>
+                        <h3 className="text-slate-400 font-bold uppercase text-xs tracking-widest font-mono">Today's Progress Goal</h3>
+                        
+                        <div className="space-y-4 mt-6">
+                          <div>
+                            <div className="flex justify-between text-xs mb-1.5 font-extrabold text-slate-300 font-mono">
+                              <span>일일 목표 (10분)</span>
+                              <span className="text-blue-400">{stats.todayPercent}%</span>
+                            </div>
+                            <div className="h-3 w-full bg-slate-950 rounded-full overflow-hidden p-0.5 border border-slate-800">
+                              <div
+                                className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full shadow-[0_0_10px_rgba(59,130,246,0.5)] transition-all duration-300"
+                                style={{ width: `${stats.todayPercent}%` }}
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2 text-center pt-2">
+                            <div className="bg-slate-950/40 p-2 rounded-xl border border-slate-800/60">
+                              <p className="text-[10px] text-slate-500 font-bold uppercase font-mono">Accumulated</p>
+                              <p className="font-extrabold text-xs text-slate-200 mt-0.5 font-mono">{stats.todayTotalMinutes}분</p>
+                            </div>
+                            <div className="bg-slate-950/40 p-2 rounded-xl border border-slate-800/60">
+                              <p className="text-[10px] text-slate-500 font-bold uppercase font-mono">Streak Credit</p>
+                              <p className={`font-extrabold text-xs mt-0.5 ${stats.todayStudied ? 'text-emerald-400' : 'text-orange-400'}`}>
+                                {stats.todayStudied ? '인정 🎉' : '대기 중'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Continuous Streak Fire Box */}
+                      <div className="bg-orange-500/10 border border-orange-500/30 rounded-2xl p-4 flex flex-col items-center justify-center gap-1 text-center mt-6">
+                        <div className="text-5xl mb-1.5 select-none animate-bounce" style={{ animationDuration: '3s' }}>🔥</div>
+                        <div className="text-3xl font-black text-orange-500 font-display">
+                          {stats.streak} DAYS
+                        </div>
+                        <p className="text-[10px] font-black uppercase text-orange-400 tracking-wider font-mono">
+                          Consecutive Study Streak
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Bento Cards 4-7: The 4 Metric telemetry tiles */}
+                    <div className="col-span-12 md:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-2xl p-5 flex flex-col justify-between shadow-md hover:border-indigo-500/30 transition-all backdrop-blur-md">
+                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">TODAY STUDY</span>
+                      <span className="text-xl font-black text-white mt-3 font-display flex items-center gap-1.5 font-mono">
+                        <Clock className="w-4 h-4 text-indigo-400" />
+                        {formatMinutesReadable(stats.todayMin)}
+                      </span>
+                      <span className="text-[10px] text-slate-500 mt-1 font-mono">오늘 총 공부 시간</span>
+                    </div>
+
+                    <div className="col-span-12 md:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-2xl p-5 flex flex-col justify-between shadow-md hover:border-emerald-500/30 transition-all backdrop-blur-md">
+                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">WEEKLY STUDY</span>
+                      <span className="text-xl font-black text-white mt-3 font-display flex items-center gap-1.5 font-mono">
+                        <BookOpen className="w-4 h-4 text-emerald-400" />
+                        {formatMinutesReadable(stats.weekMin)}
+                      </span>
+                      <span className="text-[10px] text-slate-500 mt-1 font-mono">이번 주 총 공부 시간</span>
+                    </div>
+
+                    <div className="col-span-12 md:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-2xl p-5 flex flex-col justify-between shadow-md hover:border-rose-500/30 transition-all backdrop-blur-md">
+                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">MONTHLY STUDY</span>
+                      <span className="text-xl font-black text-white mt-3 font-display flex items-center gap-1.5 font-mono">
+                        <TrendingUp className="w-4 h-4 text-rose-400" />
+                        {formatMinutesReadable(stats.monthMin)}
+                      </span>
+                      <span className="text-[10px] text-slate-500 mt-1 font-mono">이번 달 총 공부 시간</span>
+                    </div>
+
+                    <div className="col-span-12 md:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-2xl p-5 flex flex-col justify-between shadow-md hover:border-amber-500/30 transition-all backdrop-blur-md">
+                      <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider font-display">TOTAL STUDY</span>
+                      <span className="text-xl font-black text-white mt-3 font-display flex items-center gap-1.5 font-mono">
+                        <Trophy className="w-4 h-4 text-amber-400" />
+                        {formatMinutesReadable(stats.totalMin)}
+                      </span>
+                      <span className="text-[10px] text-slate-500 mt-1 font-mono">공부 누적 전적치</span>
+                    </div>
+
+                    {/* Bento Card 1: User Profile & Character Display */}
+                    <div className="col-span-12 md:col-span-4 lg:col-span-3 bg-slate-800/40 border border-slate-700/80 rounded-[2rem] p-6 flex flex-col justify-between shadow-xl relative overflow-hidden backdrop-blur-md">
+                      <div className="absolute top-0 right-0 p-8 opacity-5 text-indigo-400 pointer-events-none">
+                        <Shield className="w-36 h-36" />
+                      </div>
+                      <div>
+                        <div className="w-16 h-16 bg-gradient-to-br from-indigo-550 to-indigo-750 rounded-2xl mb-4 flex items-center justify-center text-3xl shadow-lg border border-indigo-500/30 select-none animate-pulse">🦁</div>
+                        <h2 className="text-2xl font-extrabold tracking-tight text-white font-display">
+                          {currentProfile.nickname} 님
+                        </h2>
+                        <p className="text-indigo-400 font-bold text-sm tracking-wide flex items-center gap-1.5 uppercase mt-1 font-display">
+                          <Award className="w-4 h-4 text-amber-500" />
+                          {currentProfile.selected_title || '첫걸음 학습자'}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3 bg-slate-950/50 p-3.5 rounded-2xl border border-slate-800/60 mt-6 md:mt-8">
+                        <div className="text-amber-400 text-3xl select-none animate-spin" style={{ animationDuration: '6s' }}>🪙</div>
+                        <div>
+                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider font-mono">Current Balance</p>
+                          <p className="text-xl font-black text-amber-400 font-mono">
+                            {currentProfile.coins.toLocaleString()} <span className="text-xs font-semibold">COINS</span>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 text-xs border-t border-slate-800/65 pt-4 mt-4">
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">누적 세션:</span>
+                          <span className="text-slate-200 font-mono font-bold">{studySessions.length} 번 완료</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">클리어 업적:</span>
+                          <span className="text-indigo-300 font-bold">{achievements.length} / {ACHIEVEMENTS.length} Cleared</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Bento Card 8: Boss Quest Battle Status */}
+                    <div className="col-span-12 lg:col-span-8 bg-slate-900/60 border-2 border-slate-700/80 rounded-[2.5rem] p-6 sm:p-8 flex flex-col sm:flex-row items-center gap-6 sm:gap-8 relative overflow-hidden shadow-2xl backdrop-blur-md">
+                      <div className="absolute inset-0 bg-red-500/5 pointer-events-none" />
+                      <div className="w-28 h-28 sm:w-32 sm:h-32 flex-shrink-0 bg-red-955/40 rounded-full flex items-center justify-center text-5xl shadow-[0_0_50px_rgba(239,68,68,0.25)] select-none animate-pulse border border-red-500/10">
+                        {currentBoss.key === 'first_study' ? '🦠' : 
+                         currentBoss.key === 'focus_beginner' ? '🗿' : 
+                         currentBoss.key === 'study_warrior' ? '👿' : 
+                         currentBoss.key === 'midterm_boss' ? '🐲' : 
+                         currentBoss.key === 'final_boss' ? '⚔️' : 
+                         currentBoss.key === 'csat_boss' ? '🔮' : '🏛️'}
+                      </div>
+                      <div className="flex-1 w-full relative z-10">
+                        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end mb-3 gap-2">
+                          <div>
+                            <p className="text-red-500 font-black text-xs uppercase tracking-widest mb-1 font-mono">Current Active Boss Quest</p>
+                            <h3 className="text-2xl sm:text-3xl font-black text-white italic underline underline-offset-4 decoration-red-600 font-display flex items-center gap-2">
+                              {currentBoss.bossName}
+                            </h3>
+                          </div>
+                          <p className="text-lg font-black text-white font-mono">
+                            {(stats.totalMin / 60).toFixed(1)} / <span className="text-slate-500">{currentBoss.requiredHours}h</span>
+                          </p>
+                        </div>
+                        <div className="h-4 w-full bg-slate-950 rounded-full p-1 border border-slate-800">
+                          <div
+                            className="h-full bg-gradient-to-r from-red-600 to-orange-500 rounded-full shadow-[0_0_12px_rgba(239,68,68,0.6)]"
+                            style={{ width: `${Math.min(100, Math.floor(((stats.totalMin / 60) / (currentBoss.requiredHours || 1)) * 100))}%` }}
+                          />
+                        </div>
+                        <p className="mt-3 text-xs text-slate-400 font-medium leading-relaxed">
+                          🎯 {currentBoss.description} <br />
+                          누적 {currentBoss.requiredHours}시간 달성 시 정복 완료! <span className="text-amber-400 font-bold font-mono">+{currentBoss.rewardCoins}🪙</span> 지급 및 <span className="text-indigo-400 font-bold font-display">"{currentBoss.rewardTitle}"</span> 왕관 칭호를 획득합니다.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Bento Card 9: Sandbox / Debug Cheat Tool Panel */}
+                    <div className="col-span-12 lg:col-span-4 bg-slate-900/35 border border-slate-800 rounded-[2rem] p-5 shadow-xl relative overflow-hidden backdrop-blur-md">
+                      <div className="flex items-center justify-between mb-3.5">
+                        <div className="flex items-center gap-1.5 text-amber-400 font-display">
+                          <Sliders className="w-4 h-4" />
+                          <h4 className="text-xs font-black uppercase tracking-wider">개발 테스트 전용 치트창</h4>
+                        </div>
+                        <button
+                          onClick={() => setSandboxVisible(!sandboxVisible)}
+                          className="text-slate-400 hover:text-slate-200 text-[10px] underline cursor-pointer"
+                        >
+                          {sandboxVisible ? '접기' : '펴기'}
+                        </button>
+                      </div>
+
+                      {sandboxVisible && (
+                        <div className="space-y-3.5 text-xs">
+                          <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800/80 text-[10px] text-slate-400">
+                            💡 채점 시 칭호 해제 및 코인 충전을 빠르게 테스트하기 위한 샌드박스입니다.
+                          </div>
+
+                          {/* Cheat Speed active toggle */}
+                          <div className="flex items-center justify-between bg-slate-950 p-2.5 rounded-lg border border-slate-805">
+                            <span className="font-semibold text-slate-300">⏱️ 타이머 60배속 가속</span>
+                            <button
+                              type="button"
+                              onClick={() => setCheatSpeedEnabled(!cheatSpeedEnabled)}
+                              className={`px-2.5 py-1 rounded text-[10px] font-bold cursor-pointer transition-colors ${
+                                cheatSpeedEnabled ? 'bg-emerald-600 text-white' : 'bg-slate-850 text-slate-400'
+                              }`}
+                            >
+                              {cheatSpeedEnabled ? 'ON (1초 = 1분)' : 'OFF'}
+                            </button>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <span className="font-semibold text-[10px] text-slate-400 block tracking-wide uppercase font-mono">가상 STUDY 세션 주입</span>
+                            
+                            <div className="grid grid-cols-3 gap-1.5 font-display">
+                              <button
+                                type="button"
+                                onClick={() => injectMockStudySession(10)}
+                                className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
+                              >
+                                +10분
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => injectMockStudySession(60)}
+                                className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
+                              >
+                                +1시간
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => injectMockStudySession(180)}
+                                className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
+                              >
+                                +3시간
+                              </button>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => injectMockStudySession(3000)} // Adds 50 hours!
+                                className="bg-rose-950 hover:bg-rose-900 text-rose-300 font-bold p-1.5 rounded text-[10px] border border-rose-400/20 cursor-pointer"
+                              >
+                                💀 +50시간 대량 주입
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => injectMockStudySession(18000)} // Adds 300 hours!
+                                className="bg-violet-950 hover:bg-violet-900 text-violet-300 font-bold p-1.5 rounded text-[10px] border border-violet-400/25 cursor-pointer"
+                              >
+                                🌌 +300시간 무한 주입
+                              </button>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={handleCoinsCheat}
+                            className="w-full flex items-center justify-center gap-1.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 font-bold py-1.5 px-3 rounded-lg cursor-pointer text-xs hover:bg-amber-500/25"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            🪙 1,000 코인 치트 지급 받기
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                  </motion.div>
+                )}
+
+                {/* 2. HISTORY PANEL */}
+                {activeTab === 'history' && (
+                  <motion.div
+                    key="history"
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    transition={{ duration: 0.2 }}
+                    className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl"
+                  >
+                    <div className="flex flex-wrap justify-between items-center mb-6 gap-3">
+                      <div>
+                        <h3 className="text-lg font-bold font-display text-white">공부 완료 기록 Logs</h3>
+                        <p className="text-xs text-slate-400 mt-1">수강자의 소중한 일련의 집중 세션을 보관하는 곳입니다.</p>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-xs font-semibold text-indigo-400 bg-indigo-500/10 px-3 py-1 rounded-full border border-indigo-500/20">
+                          총 세션 기록 개수: {studySessions.length} 개
+                        </span>
+                      </div>
+                    </div>
+
+                    {studySessions.length === 0 ? (
+                      <div className="text-center py-16 border-2 border-dashed border-slate-800 rounded-2xl">
+                        <div className="inline-flex bg-slate-950 p-4 rounded-full text-slate-600 mb-3">
+                          <History className="w-8 h-8" />
+                        </div>
+                        <h4 className="text-slate-300 font-bold">기록된 세션이 없습니다</h4>
+                        <p className="text-xs text-slate-500 max-w-sm mx-auto mt-2 leading-relaxed">
+                          타이머로 공부를 시작하거나 우측 샌드박스에서 테스트용 완료 공부 세션들을 추가해 보세요!
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-mono">
+                              <th className="py-3 px-4 font-bold">날짜 / 시작시각</th>
+                              <th className="py-3 px-4 font-bold">종료 시각</th>
+                              <th className="py-3 px-4 font-bold">집중 시간</th>
+                              <th className="py-3 px-4 font-bold">획득 코인 보상</th>
+                              <th className="py-3 px-4 text-right font-bold">아이콘 상태</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-850">
+                            {studySessions.map((session) => {
+                              const startDate = new Date(session.started_at);
+                              const endDate = new Date(session.ended_at);
+                              
+                              const dateStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2,'0')}-${String(startDate.getDate()).padStart(2,'0')}`;
+                              const startStr = `${String(startDate.getHours()).padStart(2,'0')}:${String(startDate.getMinutes()).padStart(2,'0')}:${String(startDate.getSeconds()).padStart(2,'0')}`;
+                              const endStr = `${String(endDate.getHours()).padStart(2,'0')}:${String(endDate.getMinutes()).padStart(2,'0')}:${String(endDate.getSeconds()).padStart(2,'0')}`;
+
+                              return (
+                                <tr key={session.id} className="hover:bg-slate-850/50 transition-colors">
+                                  <td className="py-3.5 px-4 font-medium">
+                                    <span className="block text-slate-100 font-bold">{dateStr}</span>
+                                    <span className="text-[10px] text-slate-500 font-mono">{startStr}</span>
+                                  </td>
+                                  <td className="py-3.5 px-4 text-slate-400 font-mono">
+                                    {endStr}
+                                  </td>
+                                  <td className="py-3.5 px-4">
+                                    <span className="inline-flex bg-indigo-500/10 text-indigo-300 font-semibold px-2 py-0.5 rounded font-mono border border-indigo-500/20">
+                                      {session.duration_minutes} 분
+                                    </span>
+                                  </td>
+                                  <td className="py-3.5 px-4 font-bold text-amber-400 font-mono">
+                                    +{session.earned_coins} 🪙
+                                  </td>
+                                  <td className="py-3.5 px-4 text-right text-emerald-400 font-bold">
+                                    <span className="inline-flex items-center gap-1 text-[11px] bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+                                      <Check className="w-3 h-3" />
+                                      완료됨
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+
+                {/* 3. ACHIEVEMENTS & BOSS RAID PANEL */}
+                {activeTab === 'achievements' && (
+                  <motion.div
+                    key="achievements"
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex flex-col gap-6"
+                  >
+                    
+                    {/* Top status progress card */}
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                      <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
+                        <div>
+                          <h3 className="text-lg font-bold font-display text-white">👾 공부 시간 보스 레이드</h3>
+                          <p className="text-xs text-slate-400 mt-1">공부 시간이 쌓이면 보스가 처치되고 전설의 칭호와 거금의 코인을 얻습니다.</p>
+                        </div>
+                        <div className="bg-indigo-600/10 border border-indigo-500/20 rounded-xl px-4 py-2 text-right">
+                          <span className="text-[10px] font-mono text-slate-400 block font-bold">보스 정복률</span>
+                          <span className="text-base font-black text-indigo-400 font-display">
+                            {achievements.length} / {ACHIEVEMENTS.length} Clear ({Math.floor((achievements.length / ACHIEVEMENTS.length) * 100)}%)
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Cumulative total gauge indicator */}
+                      <div className="w-full bg-slate-950 p-4 rounded-xl border border-slate-800/80">
+                        <div className="flex justify-between items-center text-xs mb-2">
+                          <span className="text-slate-400 font-medium font-display">나의 총 누적 공부시간 누적 게이지:</span>
+                          <span className="text-amber-400 font-mono font-bold text-sm">
+                            {formatMinutesReadable(stats.totalMin)} ({(stats.totalMin / 60).toFixed(1)}시간)
+                          </span>
+                        </div>
+                        <div className="w-full bg-slate-800 rounded-full h-3 overflow-hidden">
+                          <div
+                            className="bg-gradient-to-r from-indigo-500 via-purple-500 to-amber-400 h-3 rounded-full transition-all duration-300"
+                            style={{ width: `${Math.min(100, (stats.totalMin / (500 * 60)) * 100)}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-500 font-mono mt-1.5">
+                          <span>0시간</span>
+                          <span>총 500시간 이상이면 제우스 완파!</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Boss selection lists */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      {ACHIEVEMENTS.map((ach) => {
+                        const isUnlocked = achievements.some(a => a.achievement_key === ach.key);
+                        const cumulativeHours = stats.totalMin / 60;
+                        const progressPercent = ach.requiredHours === 0 
+                          ? (studySessions.length >= 1 ? 100 : 0)
+                          : Math.min(100, Math.floor((cumulativeHours / ach.requiredHours) * 100));
+
+                        // Unique boss emojis
+                        const getBossEmoji = (key: string) => {
+                          switch (key) {
+                            case 'first_study': return '🟢🦠'; // slime
+                            case 'focus_beginner': return '🤖🗿'; // golem
+                            case 'study_warrior': return '🦇👿'; // gargoyle
+                            case 'midterm_boss': return '🐲🔥'; // Red Dragon
+                            case 'final_boss': return '💀⚔️'; // Death Knight
+                            case 'csat_boss': return '🧙‍♂️🔮'; // Archpriest
+                            case 'legendary_student': return '⚡⚡⚡🏛️'; // Zeus
+                            default: return '👾';
+                          }
+                        };
+
+                        return (
+                          <div
+                            key={ach.key}
+                            className={`p-5 rounded-2xl border transition-all relative overflow-hidden flex flex-col justify-between ${
+                              isUnlocked
+                                ? 'bg-slate-900/40 border-slate-800'
+                                : 'bg-slate-900 border-indigo-500/10 shadow-lg'
+                            }`}
+                          >
+                            {/* Defeated state filters */}
+                            {isUnlocked && (
+                              <div className="absolute top-0 right-0 bg-emerald-500/10 border-l border-b border-emerald-500/30 text-emerald-400 text-[10px] font-black px-3.5 py-1 rounded-bl-xl font-display uppercase tracking-widest z-10">
+                                Clear ✅
+                              </div>
+                            )}
+
+                            <div>
+                              
+                              {/* Boss identifier info */}
+                              <div className="flex gap-3.5 items-start mb-4">
+                                <div className={`w-14 h-14 rounded-xl flex flex-col items-center justify-center text-2xl border select-none ${
+                                  isUnlocked 
+                                    ? 'bg-slate-950/60 border-slate-800 saturate-50' 
+                                    : 'bg-slate-950 border-indigo-400/20'
+                                }`}>
+                                  {getBossEmoji(ach.key)}
+                                </div>
+                                <div className="flex-1">
+                                  <span className="text-[9px] text-indigo-400 font-mono tracking-widest uppercase font-bold block">
+                                    Boss {ach.key === 'first_study' ? '1' : ach.requiredHours + 'Hour'}
+                                  </span>
+                                  <h4 className={`text-base font-extrabold font-display ${isUnlocked ? 'text-slate-400 line-through' : 'text-slate-100'}`}>
+                                    {ach.bossName}
+                                  </h4>
+                                  <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                                    업적명: {ach.name}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="space-y-3">
+                                <p className="text-xs text-slate-400 leading-relaxed bg-slate-950/40 p-2.5 rounded-lg border border-slate-850">
+                                  📖 {ach.description}
+                                </p>
+
+                                {/* Boss HP indicator */}
+                                <div className="space-y-1">
+                                  <div className="flex justify-between text-[10px] font-mono">
+                                    <span className="text-rose-400 font-bold">HP {isUnlocked ? 0 : ach.bossHp} / {ach.bossHp}</span>
+                                    <span className="text-slate-400">처치 진척도 {progressPercent}%</span>
+                                  </div>
+                                  <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
+                                    <div
+                                      className={`h-1.5 rounded-full transition-all duration-300 ${
+                                        isUnlocked ? 'bg-slate-700' : 'bg-rose-600'
+                                      }`}
+                                      style={{ width: `${isUnlocked ? 0 : (100 - progressPercent)}%` }}
+                                    />
+                                  </div>
+                                </div>
+
+                              </div>
+                            </div>
+
+                            {/* Rewards bottom layout */}
+                            <div className="mt-5 pt-3.5 border-t border-slate-850 flex items-center justify-between">
+                              <div className="flex flex-col">
+                                <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest">Rewards</span>
+                                <span className="text-xs font-bold text-amber-400 flex items-center gap-0.5 mt-0.5">
+                                  +{ach.rewardCoins} 🪙
+                                  {ach.rewardTitle && (
+                                    <span className="text-indigo-300 ml-1.5 text-[10px] font-semibold bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20">
+                                      👑 {ach.rewardTitle}
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+
+                              {!isUnlocked ? (
+                                <span className="text-[10px] text-indigo-400 font-mono flex items-center gap-1 font-bold bg-indigo-500/5 border border-indigo-500/10 px-2 py-1 rounded">
+                                  <Lock className="w-3.5 h-3.5" />
+                                  공격 불가
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1 font-bold bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 rounded">
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  토벌 격파됨
+                                </span>
+                              )}
+                            </div>
+
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                  </motion.div>
+                )}
+
+                {/* 4. RANKINGS BOARD PANEL */}
+                {activeTab === 'rankings' && (
+                  <motion.div
+                    key="rankings"
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    transition={{ duration: 0.2 }}
+                    className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl"
+                  >
+                    
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+                      <div>
+                        <h3 className="text-lg font-bold font-display text-white">공부 경쟁 랭킹 보드</h3>
+                        <p className="text-xs text-slate-400 mt-1">
+                          전 세계 공부 게이머들과 공부 시간 및 획득 코인 경쟁을 벌이세요!
+                        </p>
+                      </div>
+
+                      {/* Filter Toggles */}
+                      <div className="flex bg-slate-950 p-1 rounded-xl self-stretch sm:self-auto border border-slate-800 text-[11px]">
+                        <button
+                          onClick={() => setRankingType('today')}
+                          className={`py-1.5 px-3 rounded-lg font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                            rankingType === 'today' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          오늘 하루
+                        </button>
+                        <button
+                          onClick={() => setRankingType('week')}
+                          className={`py-1.5 px-3 rounded-lg font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                            rankingType === 'week' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          이번 주간
+                        </button>
+                        <button
+                          onClick={() => setRankingType('total')}
+                          className={`py-1.5 px-3 rounded-lg font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                            rankingType === 'total' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          누적 시간
+                        </button>
+                        <button
+                          onClick={() => setRankingType('coins')}
+                          className={`py-1.5 px-3 rounded-lg font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                            rankingType === 'coins' ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          코인 랭킹
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Rankings Content List */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="border-b border-slate-800 text-slate-400 font-mono uppercase tracking-wider">
+                            <th className="py-3 px-4 font-bold">순위 Rank</th>
+                            <th className="py-3 px-4 font-bold">도전자 닉네임</th>
+                            <th className="py-3 px-4 font-bold">장착 중인 칭호</th>
+                            <th className="py-3 px-4 font-bold text-right">
+                              {rankingType === 'coins' ? '보유 코인' : '공부 집중시간'}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-850">
+                          {rankings.map((rk, idx) => {
+                            const isUserRow = rk.is_user;
+
+                            // Custom medal tag
+                            const getRankBadge = (rank: number) => {
+                              if (rank === 1) return <span className="text-base select-none">🥇</span>;
+                              if (rank === 2) return <span className="text-base select-none">🥈</span>;
+                              if (rank === 3) return <span className="text-base select-none">🥉</span>;
+                              return <span className="font-mono text-slate-500 font-bold ml-1">{rank}</span>;
+                            };
+
+                            return (
+                              <tr
+                                key={rk.nickname + '_' + idx}
+                                className={`transition-all ${
+                                  isUserRow
+                                    ? 'bg-indigo-500/15 border-y-2 border-indigo-500/30'
+                                    : 'hover:bg-slate-850/30'
+                                }`}
+                              >
+                                <td className="py-3.5 px-4">
+                                  {getRankBadge(rk.rank)}
+                                </td>
+                                <td className="py-3.5 px-4 font-medium flex items-center gap-1.5">
+                                  <span className={`font-bold ${isUserRow ? 'text-indigo-300' : 'text-slate-200'}`}>
+                                    {rk.nickname}
+                                  </span>
+                                  {isUserRow && (
+                                    <span className="text-[9px] bg-indigo-500 text-white font-bold px-1.5 py-0.5 rounded-full select-none">
+                                      나
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-3.5 px-4">
+                                  <span className="text-[10px] bg-slate-950/60 text-slate-300 px-2.5 py-1 rounded border border-slate-800">
+                                    {rk.selected_title || '첫걸음 학습자'}
+                                  </span>
+                                </td>
+                                <td className="py-3.5 px-4 text-right font-mono font-bold text-slate-100 text-[13px]">
+                                  {rankingType === 'coins' ? (
+                                    <span className="text-amber-400">{rk.value.toLocaleString()} 🪙</span>
+                                  ) : (
+                                    formatMinutesReadable(rk.value)
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <p className="text-[11px] text-slate-500 mt-4 leading-relaxed font-mono">
+                      * 로컬 샌드박스 상태에서는 공부 자극 및 테스트 재미 향상을 위해 6명의 쟁쟁한 가상 라이벌 유저가 경쟁 보드에 정기 수록됩니다!
+                    </p>
+
+                  </motion.div>
+                )}
+
+                {/* 5. PROFILE & TITLE EQUIPMENT PANEL */}
+                {activeTab === 'profile' && (
+                  <motion.div
+                    key="profile"
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    transition={{ duration: 0.2 }}
+                    className="grid grid-cols-1 md:grid-cols-3 gap-6"
+                  >
+                    
+                    {/* Left Column (Nickname modification form) */}
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                      <div>
+                        <h3 className="text-lg font-bold font-display text-white mb-1">도전자 신원 정보</h3>
+                        <p className="text-xs text-slate-400 mb-5">활동 중인 개인 프로필과 칭호를 관리하세요.</p>
+
+                        <form onSubmit={handleUpdateNicknameSubmit} className="space-y-4">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">가입 이메일</label>
+                            <input
+                              type="email"
+                              disabled
+                              value={currentUser.email || ''}
+                              className="w-full bg-slate-950/80 border border-slate-850 rounded-xl px-3.5 py-2.5 text-sm text-slate-500"
+                            />
+                            <span className="text-[10px] text-slate-500 mt-1 block">이메일 변경은 지원하지 않습니다.</span>
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">내 닉네임 변경</label>
+                            <input
+                              type="text"
+                              required
+                              value={newNickname}
+                              onChange={(e) => setNewNickname(e.target.value)}
+                              placeholder="닉네임 입력"
+                              maxLength={15}
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                            />
+                          </div>
+
+                          <button
+                            type="submit"
+                            disabled={profileSaving}
+                            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs py-3 rounded-xl cursor-pointer transition-colors shadow-md active:scale-98"
+                          >
+                            {profileSaving ? '신원 정보 변경 중...' : '💾 프로필 정보 저장'}
+                          </button>
+                        </form>
+                      </div>
+
+                      {/* Account system notes */}
+                      <div className="mt-8 pt-4 border-t border-slate-850 text-xs text-slate-400 leading-relaxed font-mono">
+                        <div className="flex justify-between mb-1">
+                          <span>계정 유형:</span>
+                          <span className={`font-bold ${isSupabaseMode ? 'text-emerald-400' : 'text-amber-400'}`}>
+                            {isSupabaseMode ? 'Supabase 클라우드' : '로컬 모드'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>활동 칭호 개수:</span>
+                          <span className="font-bold text-indigo-400">{titles.length} 개 획득</span>
+                        </div>
+                      </div>
+
+                    </div>
+
+                    {/* Right column (Titles Management Equipment Grid) */}
+                    <div className="md:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                      <div className="mb-5">
+                        <h3 className="text-lg font-bold font-display text-white">내가 획득한 칭호 목록</h3>
+                        <p className="text-xs text-slate-400 mt-1">업적 달성으로 얻은 칭호들입니다. 원하는 대표 칭호를 장착하여 랭킹 및 대시보드에 전시하세요!</p>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        {/* Always have default title '첫걸음 학습자' */}
+                        <div
+                          onClick={() => handleEquipTitle('첫걸음 학습자')}
+                          className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
+                            currentProfile.selected_title === '첫걸음 학습자'
+                              ? 'bg-indigo-600/10 border-indigo-500 glow-blue'
+                              : 'bg-slate-950/80 border-slate-850 hover:border-slate-700'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex justify-between items-start">
+                              <span className="text-xs font-black text-indigo-300 font-display">첫걸음 학습자 🔰</span>
+                              {currentProfile.selected_title === '첫걸음 학습자' && (
+                                <span className="bg-indigo-500 text-white font-bold text-[8px] px-1.5 py-0.5 rounded-full uppercase"> 장착 중</span>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-slate-400 mt-1.5">회원 가입 시 즉석 무료 배포되는 신인 도전자 칭호</p>
+                          </div>
+                          <span className="text-[10px] text-indigo-400/80 font-semibold mt-3">기본 제공 완료</span>
+                        </div>
+
+                        {/* List other potentially owned titles */}
+                        {ACHIEVEMENTS.map((ach) => {
+                          if (!ach.rewardTitle) return null;
+                          const hasUnlockedTitle = titles.some(t => t.title === ach.rewardTitle);
+
+                          return (
+                            <div
+                              key={ach.key}
+                              onClick={() => {
+                                if (hasUnlockedTitle) {
+                                  handleEquipTitle(ach.rewardTitle!);
+                                } else {
+                                  alert(`'${ach.bossName}' 보스 토벌 처치 업적 달성 시 잠금이 해제되는 한정 칭호입니다!`);
+                                }
+                              }}
+                              className={`p-4 rounded-xl border transition-all ${
+                                hasUnlockedTitle ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'
+                              } ${
+                                hasUnlockedTitle
+                                  ? currentProfile.selected_title === ach.rewardTitle
+                                    ? 'bg-indigo-600/10 border-indigo-500 glow-blue'
+                                    : 'bg-slate-950/80 border-slate-850 hover:border-slate-700'
+                                  : 'bg-slate-950/20 border-dashed border-slate-850'
+                              }`}
+                            >
+                              <div className="flex justify-between items-start">
+                                <span className={`text-xs font-black font-display ${hasUnlockedTitle ? 'text-indigo-300' : 'text-slate-500'}`}>
+                                  {ach.rewardTitle}
+                                </span>
+                                {currentProfile.selected_title === ach.rewardTitle && (
+                                  <span className="bg-indigo-500 text-white font-bold text-[8px] px-1.5 py-0.5 rounded-full uppercase">장착 중</span>
+                                )}
+                              </div>
+
+                              <p className="text-[11px] text-slate-400 mt-1.5">
+                                {hasUnlockedTitle 
+                                  ? `${ach.bossName} 처치 기념 전리품` 
+                                  : `${ach.requiredHours}시간 대화적 축적 필요`
+                                }
+                              </p>
+
+                              <div className="flex justify-between items-center mt-3">
+                                <span className="text-[9px] font-mono text-slate-500">잠금 조건: {ach.requiredHours === 0 ? '첫 세션' : `${ach.requiredHours}시간 달성`}</span>
+                                {!hasUnlockedTitle ? (
+                                  <span className="text-[10px] text-slate-500 flex items-center gap-0.5">
+                                    <Lock className="w-3 h-3" /> 잠김
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] text-emerald-400 flex items-center gap-0.5 font-bold">
+                                    <Unlock className="w-3 h-3" /> 획득됨
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                    </div>
+
+                  </motion.div>
+                )}
+
+              </AnimatePresence>
+            </div>
+
+          </div>
+        )}
+
+      </main>
+
+      {/* FOOTER */}
+      <footer className="bg-slate-900 border-t border-slate-850 py-6 text-center text-xs text-slate-500 font-mono mt-12">
+        <p>© 2026 Study Coin Quest. All Rights Reserved.</p>
+        <p className="mt-1 text-[10px] text-slate-600">공부 시간은 코인이 되고, 코인은 열정의 불꽃이 됩니다.</p>
+      </footer>
+
+      {/* POPUP: REWARD breakout on study completion */}
+      <AnimatePresence>
+        {sessionFinishReward && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-slate-900 border-2 border-amber-500/30 rounded-2xl p-6 max-w-sm w-full shadow-2xl relative"
+            >
+              <div className="text-center">
+                <div className="inline-flex bg-amber-500/10 p-3 rounded-full text-amber-400 mb-3 animate-spin" style={{ animationDuration: '4s' }}>
+                  <Coins className="w-8 h-8" />
+                </div>
+                
+                <h3 className="text-lg font-bold font-display text-white">🎉 공부 기록 완료 및 보상 지급!</h3>
+                <p className="text-xs text-slate-400 mt-1">집중에 성공하여 대량의 코인을 획득하셨습니다!</p>
+
+                <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 my-4 text-xs space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">학습 지속 시간:</span>
+                    <span className="text-white font-mono font-bold">{sessionFinishReward.minutes}분</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">기본 지급 코인 (1분=1🪙):</span>
+                    <span className="text-amber-400 font-mono font-bold">{sessionFinishReward.baseCoins} 🪙</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">장기 집중 보너스:</span>
+                    <span className="text-amber-400 font-mono font-bold">+{sessionFinishReward.bonusCoins} 🪙</span>
+                  </div>
+                  <div className="border-t border-slate-800 my-2 pt-2 flex justify-between text-sm font-bold">
+                    <span className="text-slate-200">총 적립 코인:</span>
+                    <span className="text-yellow-400">{sessionFinishReward.totalCoins} 🪙</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setSessionFinishReward(null)}
+                  className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs py-3 rounded-xl cursor-pointer transition-colors shadow-lg active:scale-98"
+                >
+                  보상 수령하고 계속하기 🛡️
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* POPUP: BOSS DEFEATED Celebration modal */}
+      <AnimatePresence>
+        {bossClearCelebration && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              className="bg-indigo-950 border-2 border-amber-400 rounded-3xl p-6 max-w-md w-full shadow-2xl relative text-center overflow-hidden"
+            >
+              {/* Top lighting animation */}
+              <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-yellow-300 via-amber-500 to-yellow-300 animate-pulse" />
+
+              <div className="relative z-10">
+                <span className="text-[10px] font-mono font-bold tracking-widest text-amber-400 uppercase bg-amber-400/10 px-3 py-1 rounded-full border border-amber-400/20">
+                  BOSS SLAYED ⚔️
+                </span>
+
+                <div className="text-5xl my-4 select-none animate-bounce">
+                  🏆🔥💀
+                </div>
+
+                <h3 className="text-xl font-extrabold font-display text-white mt-2">
+                  [{bossClearCelebration.bossName}] 보스 퇴치 완료!
+                </h3>
+                
+                <p className="text-xs text-slate-400 max-w-xs mx-auto mt-2 leading-relaxed">
+                  누적 학습 시간 업적 <span className="text-yellow-400 font-semibold font-display">[{bossClearCelebration.achievementName}]</span>을 달성하여 수문장 보스를 처단했습니다!
+                </p>
+
+                <div className="bg-slate-950/80 p-4 rounded-2xl border border-amber-500/20 my-5 text-xs text-left max-w-sm mx-auto space-y-2">
+                  <span className="text-[10px] text-slate-500 block uppercase font-mono tracking-widest font-bold">Loot Drop (획득물 전리품)</span>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">토벌 상금 지급:</span>
+                    <span className="text-yellow-400 font-bold text-sm font-mono flex items-center gap-0.5">
+                      +{bossClearCelebration.coinsReward} 🪙
+                    </span>
+                  </div>
+                  {bossClearCelebration.titleReward && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">장비 장착 칭호 해제:</span>
+                      <span className="bg-indigo-500/10 text-indigo-300 border border-indigo-400/20 px-2 py-0.5 rounded font-bold font-display text-[10px]">
+                        🏆 [{bossClearCelebration.titleReward}]
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      if (bossClearCelebration.titleReward) {
+                        handleEquipTitle(bossClearCelebration.titleReward);
+                      }
+                      setBossClearCelebration(null);
+                    }}
+                    className="flex-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs py-3 rounded-xl cursor-pointer transition-colors shadow-lg"
+                  >
+                    새로운 칭호 장착하고 복귀
+                  </button>
+                  <button
+                    onClick={() => setBossClearCelebration(null)}
+                    className="flex-1 bg-indigo-800 hover:bg-indigo-700 text-white font-bold text-xs py-3 rounded-xl cursor-pointer transition-colors"
+                  >
+                    수령 후 확인
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+    </div>
+  );
+}
