@@ -23,9 +23,12 @@ import {
   TrendingUp,
   Shield,
   Edit2,
-  Plus
+  Plus,
+  Sun,
+  Moon
 } from 'lucide-react';
 import { DBProvider } from './dbProvider';
+import { supabase } from './supabaseClient';
 import { ACHIEVEMENTS, Profile, StudySession, UserAchievement, UserTitle, RankingItem } from './types';
 
 // Safe LocalStorage helper for Sandboxed iFrame Environment
@@ -58,6 +61,21 @@ const safeLocalStorage = {
 };
 
 export default function App() {
+  // Theme state: 'light' | 'dark'
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    return (safeLocalStorage.getItem('coinquest_theme') as 'light' | 'dark') || 'dark';
+  });
+
+  // Theme synchronization effect with local storage and root class
+  useEffect(() => {
+    if (theme === 'light') {
+      document.documentElement.classList.add('light');
+    } else {
+      document.documentElement.classList.remove('light');
+    }
+    safeLocalStorage.setItem('coinquest_theme', theme);
+  }, [theme]);
+
   // DB & Auth State
   const [currentUser, setCurrentUser] = useState<any | null>(null);
   const [currentProfile, setCurrentProfile] = useState<Profile | null>(null);
@@ -150,6 +168,53 @@ export default function App() {
       loadRankings();
     }
   }, [currentUser, currentProfile, rankingType, studySessions]);
+
+  // Supabase Real-time sync for study_sessions and profiles changes
+  useEffect(() => {
+    if (!isSupabaseMode || !currentUser || !supabase) return;
+    
+    // Subscribe to both 'profiles' and 'study_sessions' table modifications in real-time
+    const channel = supabase
+      .channel('realtime-rankings')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'study_sessions' },
+        () => {
+          loadRankings();
+          // Also fetch list of sessions to update graph dynamically
+          DBProvider.getStudySessions(currentUser.id)
+            .then(sessions => setStudySessions(sessions))
+            .catch(err => console.error('study_sessions sync error:', err));
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'profiles' },
+        (payload: any) => {
+          loadRankings();
+          // If our own profile updated on another device or directly
+          if (payload.new && payload.new.id === currentUser.id) {
+            setCurrentProfile(payload.new);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [isSupabaseMode, currentUser]);
+
+  // Backup polling sync for rankings and user sessions (every 15 seconds)
+  useEffect(() => {
+    if (!currentUser || !currentProfile) return;
+    
+    const pollInterval = setInterval(() => {
+      loadRankings();
+    }, 15000); // 15s interval
+    
+    return () => clearInterval(pollInterval);
+  }, [currentUser, currentProfile, rankingType]);
 
   // Live stopwatch update
   useEffect(() => {
@@ -598,6 +663,71 @@ export default function App() {
     }
   };
 
+  // Developer Super Cheat Action
+  const handleDeveloperSuperCheat = async () => {
+    if (!currentUser || !currentProfile) return;
+    try {
+      setLoading(true);
+      // Give 1,000,000 coins + set supreme GM Title
+      const upProfile = await DBProvider.updateProfile(currentUser.id, { 
+        coins: (currentProfile.coins || 0) + 1000000,
+        selected_title: '👑 총괄 게임마스터 GM (개발자)'
+      });
+      setCurrentProfile(upProfile);
+      
+      // Inject all titles in DB for swift game testing
+      if (isSupabaseMode && supabase) {
+        for (const ach of ACHIEVEMENTS) {
+          try {
+            if (ach.rewardTitle) {
+              await supabase
+                .from('user_titles')
+                .insert({ user_id: currentUser.id, title: ach.rewardTitle });
+            }
+          } catch (e) {
+            // ignore duplicate entries
+          }
+
+          try {
+            await supabase
+              .from('user_achievements')
+              .insert({ user_id: currentUser.id, achievement_key: ach.key });
+          } catch (e) {
+            // ignore duplicate entries
+          }
+        }
+      } else {
+        const titlesRaw = safeLocalStorage.getItem('quest_titles') || '[]';
+        let titlesLocal = [];
+        try {
+          titlesLocal = JSON.parse(titlesRaw);
+        } catch (e) {
+          titlesLocal = [];
+        }
+        
+        ACHIEVEMENTS.forEach(ach => {
+          if (ach.rewardTitle && !titlesLocal.some((t: any) => t.user_id === currentUser.id && t.title === ach.rewardTitle)) {
+            titlesLocal.push({ 
+              id: 'dev-' + Math.random().toString(36).substr(2, 9), 
+              user_id: currentUser.id, 
+              title: ach.rewardTitle, 
+              created_at: new Date().toISOString() 
+            });
+          }
+        });
+        safeLocalStorage.setItem('quest_titles', JSON.stringify(titlesLocal));
+      }
+      
+      await loadUserData();
+      showToast('⚡ [총괄 개발자 GM 권한 활성화] 1,000,000 골드 지급 및 전 서버 타이틀 올클리어가 반영되었습니다!', 'success');
+    } catch (err: any) {
+      console.error('Developer super cheat fail:', err);
+      showToast('개발자 치트 처리 중 에러가 발생했습니다: ' + err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Equip unlocked title
   const handleEquipTitle = async (title: string) => {
     if (!currentUser || !currentProfile) return;
@@ -654,7 +784,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0f172a] text-slate-100 flex flex-col font-sans transition-all selection:bg-amber-400 selection:text-slate-900">
+    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans transition-all selection:bg-amber-400 selection:text-slate-900">
       
       {/* Custom Toast Notification Overlay */}
       <AnimatePresence>
@@ -688,7 +818,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* Main Header navigation */}
-      <header className="bg-[#1e293b]/80 border-b border-slate-700/80 sticky top-0 z-40 backdrop-blur-md shadow-lg">
+      <header className="bg-slate-800/80 border-b border-slate-700/80 sticky top-0 z-40 backdrop-blur-md shadow-lg transition-all duration-300">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-12 flex items-center justify-between">
           
           {/* Logo with swords and coins */}
@@ -697,48 +827,81 @@ export default function App() {
               <Coins className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-lg font-extrabold tracking-tight font-display text-white">
+              <h1 className={`text-lg font-extrabold tracking-tight font-display transition-colors ${theme === 'light' ? 'text-slate-900' : 'text-white'}`}>
                 스피지 <span className="text-amber-400">SPG</span>
               </h1>
               <p className="text-[10px] text-slate-400 -mt-0.5 tracking-wider font-mono">STUDY + RPG 게이밍 타이머</p>
             </div>
           </div>
 
-          {/* User state or logs */}
-          {currentUser && currentProfile && (
-            <div className="flex items-center gap-3 sm:gap-6">
-              
-              {/* Character miniature info */}
-              <div className="hidden sm:flex flex-col text-right">
-                <span className="text-xs font-semibold text-slate-200 flex items-center justify-end gap-1.5">
-                  <span className="bg-indigo-500/10 text-indigo-300 font-mono text-[9px] px-1.5 py-0.5 rounded border border-indigo-400/20">
-                    {currentProfile.selected_title || '첫걸음 학습자'}
+          {/* Header Controls */}
+          <div className="flex items-center gap-3">
+            {/* Theme Toggle Button */}
+            <button
+              onClick={() => setTheme(prev => prev === 'light' ? 'dark' : 'light')}
+              title={theme === 'light' ? '다크 모드(밤)로 전환' : '라이트 모드(낮)로 전환'}
+              className={`p-1.5 rounded-lg border transition-all cursor-pointer flex items-center justify-center hover:scale-105 active:scale-95 ${
+                theme === 'light'
+                  ? 'bg-amber-50 hover:bg-amber-100 text-amber-600 border-amber-200'
+                  : 'bg-slate-800/80 hover:bg-slate-750 text-amber-400 border-slate-700/80 glow-gold'
+              }`}
+            >
+              {theme === 'light' ? (
+                <div className="flex items-center gap-1.5 px-0.5">
+                  <Sun className="w-4 h-4 text-amber-500 animate-spin" style={{ animationDuration: '20s' }} />
+                  <span className="text-[10px] font-bold hidden sm:inline-block">낮 모드</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 px-0.5">
+                  <Moon className="w-4 h-4 text-indigo-300 animate-pulse" />
+                  <span className="text-[10px] font-bold hidden sm:inline-block">밤 모드</span>
+                </div>
+              )}
+            </button>
+
+            {/* User state or logs */}
+            {currentUser && currentProfile && (
+              <div className="flex items-center gap-3 sm:gap-6">
+                
+                {/* Character miniature info */}
+                <div className="hidden sm:flex flex-col text-right">
+                  <span className="text-xs font-semibold text-slate-200 flex items-center justify-end gap-1.5">
+                    {currentUser?.email === 'seungki611@gmail.com' && (
+                      <span className="bg-gradient-to-r from-rose-500 via-purple-600 to-indigo-600 text-white font-black text-[9px] px-2 py-0.5 rounded shadow glow-gold border border-pink-400/20 uppercase tracking-wider animate-pulse">
+                        개발자 GM 🛠️
+                      </span>
+                    )}
+                    <span className="bg-indigo-500/10 text-indigo-300 font-mono text-[9px] px-1.5 py-0.5 rounded border border-indigo-400/20">
+                      {currentProfile.selected_title || '첫걸음 학습자'}
+                    </span>
+                    {currentProfile.nickname} 님
                   </span>
-                  {currentProfile.nickname} 님
-                </span>
-                <span className="text-[10px] font-mono text-slate-400">학습 레벨 게이머</span>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    {currentUser?.email === 'seungki611@gmail.com' ? '👑 시스템 총괄 관리주체' : '학습 레벨 게이머'}
+                  </span>
+                </div>
+
+                {/* Coins counter widget */}
+                <div className="bg-slate-950 border border-slate-700/80 bg-opacity-40 rounded-full py-1 px-3 flex items-center gap-1.5 glow-gold">
+                  <Coins className="w-4 h-4 text-amber-400 animate-spin" style={{ animationDuration: '3s' }} />
+                  <span className="text-amber-300 font-mono text-xs font-bold">
+                    {currentProfile.coins.toLocaleString()}
+                  </span>
+                  <span className="text-amber-400/80 text-[10px] font-bold">🪙</span>
+                </div>
+
+                {/* Logout Button */}
+                <button
+                  onClick={handleLogout}
+                  title="로그아웃"
+                  className="text-slate-400 hover:text-red-400 p-1.5 hover:bg-slate-800 rounded-lg transition-all cursor-pointer"
+                >
+                  <LogOut className="w-4.5 h-4.5" />
+                </button>
+
               </div>
-
-              {/* Coins counter widget */}
-              <div className="bg-slate-950 border border-slate-700/80 bg-opacity-40 rounded-full py-1 px-3 flex items-center gap-1.5 glow-gold">
-                <Coins className="w-4 h-4 text-amber-400 animate-spin" style={{ animationDuration: '3s' }} />
-                <span className="text-amber-300 font-mono text-xs font-bold">
-                  {currentProfile.coins.toLocaleString()}
-                </span>
-                <span className="text-amber-400/80 text-[10px] font-bold">🪙</span>
-              </div>
-
-              {/* Logout Button */}
-              <button
-                onClick={handleLogout}
-                title="로그아웃"
-                className="text-slate-400 hover:text-red-400 p-1.5 hover:bg-slate-800 rounded-lg transition-all cursor-pointer"
-              >
-                <LogOut className="w-4.5 h-4.5" />
-              </button>
-
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </header>
 
@@ -924,7 +1087,7 @@ export default function App() {
           <div className="flex flex-col gap-6">
             
             {/* Nav Menu Tabs bar */}
-            <div className="flex select-none bg-[#1e293b]/55 border border-slate-700/80 p-1.5 rounded-2xl justify-between sm:justify-start gap-1 overflow-x-auto shadow-lg backdrop-blur-md">
+            <div className="flex select-none bg-slate-800/55 border border-slate-700/80 p-1.5 rounded-2xl justify-between sm:justify-start gap-1 overflow-x-auto shadow-lg backdrop-blur-md transition-all duration-300">
               <button
                 onClick={() => setActiveTab('dashboard')}
                 className={`flex items-center gap-2 py-2.5 px-3.5 sm:px-5 rounded-xl text-xs font-bold font-display tracking-wide transition-all cursor-pointer whitespace-nowrap ${
@@ -1301,6 +1464,16 @@ export default function App() {
                             <Plus className="w-3.5 h-3.5" />
                             🪙 금광 더미 채굴 (치트 골드 +1,000 획득)
                           </button>
+
+                          {currentUser?.email === 'seungki611@gmail.com' && (
+                            <button
+                              type="button"
+                              onClick={handleDeveloperSuperCheat}
+                              className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-rose-500 via-purple-600 to-indigo-600 text-white font-black py-2.5 px-3 rounded-lg cursor-pointer text-xs hover:scale-[1.01] transition-transform shadow-lg glow-gold border border-pink-400/20 active:scale-95 duration-200"
+                            >
+                              <span>🛠️ [총괄 GM 개발자 특혜] 1백만 골드 & 모든 보스/칭호 잠금해제</span>
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1635,6 +1808,7 @@ export default function App() {
                         <tbody className="divide-y divide-slate-850">
                           {rankings.map((rk, idx) => {
                             const isUserRow = rk.is_user;
+                            const isDevRow = isUserRow && currentUser?.email === 'seungki611@gmail.com';
 
                             // Custom medal tag
                             const getRankBadge = (rank: number) => {
@@ -1648,27 +1822,35 @@ export default function App() {
                               <tr
                                 key={rk.nickname + '_' + idx}
                                 className={`transition-all ${
-                                  isUserRow
-                                    ? 'bg-indigo-500/15 border-y-2 border-indigo-500/30'
-                                    : 'hover:bg-slate-850/30'
+                                  isDevRow
+                                    ? 'bg-gradient-to-r from-red-500/10 via-purple-600/15 to-indigo-600/15 border-y-2 border-purple-500/30 glow-gold'
+                                    : isUserRow
+                                      ? 'bg-indigo-500/15 border-y-2 border-indigo-500/30'
+                                      : 'hover:bg-slate-850/30'
                                 }`}
                               >
                                 <td className="py-3.5 px-4">
                                   {getRankBadge(rk.rank)}
                                 </td>
                                 <td className="py-3.5 px-4 font-medium flex items-center gap-1.5">
-                                  <span className={`font-bold ${isUserRow ? 'text-indigo-300' : 'text-slate-200'}`}>
+                                  <span className={`font-bold ${isDevRow ? 'text-amber-300' : isUserRow ? 'text-indigo-300' : 'text-slate-200'}`}>
                                     {rk.nickname}
                                   </span>
                                   {isUserRow && (
-                                    <span className="text-[9px] bg-indigo-500 text-white font-bold px-1.5 py-0.5 rounded-full select-none">
-                                      나
+                                    <span className={`text-[9px] text-white font-bold px-1.5 py-0.5 rounded-full select-none ${
+                                      isDevRow ? 'bg-gradient-to-r from-rose-500 to-indigo-500 glow-gold animate-pulse' : 'bg-indigo-500'
+                                    }`}>
+                                      {isDevRow ? '나 (GM 🛠️)' : '나'}
                                     </span>
                                   )}
                                 </td>
                                 <td className="py-3.5 px-4">
-                                  <span className="text-[10px] bg-slate-950/60 text-slate-300 px-2.5 py-1 rounded border border-slate-800">
-                                    {rk.selected_title || '초련의 학습자'}
+                                  <span className={`text-[10px] px-2.5 py-1 rounded border ${
+                                    isDevRow
+                                      ? 'bg-purple-950/60 text-amber-300 border-purple-500/40 glow-gold font-bold'
+                                      : 'bg-slate-950/60 text-slate-300 border-slate-800'
+                                  }`}>
+                                    {isDevRow ? '👑 총괄 게임마스터 GM (개발자)' : (rk.selected_title || '초련의 학습자')}
                                   </span>
                                 </td>
                                 <td className="py-3.5 px-4 text-right font-mono font-bold text-slate-100 text-[13px]">
@@ -1813,6 +1995,31 @@ export default function App() {
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        {/* Developer Exclusive Master Creator Title */}
+                        {currentUser?.email === 'seungki611@gmail.com' && (
+                          <div
+                            onClick={() => handleEquipTitle('👑 총괄 게임마스터 GM (개발자)')}
+                            className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between col-span-1 sm:col-span-2 bg-gradient-to-r from-red-500/10 via-purple-600/10 to-indigo-600/10 ${
+                              currentProfile.selected_title === '👑 총괄 게임마스터 GM (개발자)'
+                                ? 'border-amber-500 glow-gold'
+                                : 'border-purple-800/60 hover:border-purple-600'
+                            }`}
+                          >
+                            <div>
+                              <div className="flex justify-between items-start">
+                                <span className="text-xs font-black text-amber-300 font-display flex items-center gap-1.5">
+                                  👑 총괄 게임마스터 GM (개발자) 👑
+                                </span>
+                                {currentProfile.selected_title === '👑 총괄 게임마스터 GM (개발자)' && (
+                                  <span className="bg-gradient-to-r from-amber-500 to-red-600 text-white font-bold text-[8px] px-1.5 py-0.5 rounded-full uppercase glow-gold animate-pulse">장착 중</span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-purple-300 mt-1.5">이 세계선을 창조하고 설계한 seungki611@gmail.com 개발자 전용 전설의 영속 배지</p>
+                            </div>
+                            <span className="text-[10px] text-amber-400 font-semibold mt-3">🛠️ 개발자 권리 영속 귀속</span>
+                          </div>
+                        )}
+
                         {/* Always have default title '첫걸음 학습자' */}
                         <div
                           onClick={() => handleEquipTitle('첫걸음 학습자')}

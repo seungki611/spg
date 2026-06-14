@@ -40,6 +40,7 @@ export interface RankingItem {
   selected_title: string;
   value: number; // can be duration_minutes or coins
   is_user: boolean;
+  email?: string;
 }
 
 export interface AchievementDef {

@@ -7,10 +7,41 @@
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
+:root {
+  /* Default Dark Mode Theme Custom Mappings */
+  --color-slate-50: #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-300: #cbd5e1;
+  --color-slate-400: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #0f172a;
+  --color-slate-950: #020617;
+}
+
+/* Light mode overrides */
+.light {
+  --color-slate-50: #050b14; /* Hover slate white text mapping */
+  --color-slate-100: #0f172a; /* Text slate-100 becomes dark slate text */
+  --color-slate-200: #1e293b; /* Text slate-200 becomes dark slate text */
+  --color-slate-300: #334155; /* Text slate-300 becomes slate-700 */
+  --color-slate-400: #57687f; /* Text slate-400 becomes slate-600 muted grey-blue */
+  --color-slate-500: #64748b; /* Muted slate gray */
+  --color-slate-650: #cbd5e1; /* Helper for middle borders */
+  --color-slate-700: #cbd5e1; /* Divider/Border slate-700 */
+  --color-slate-800: #e2e8f0; /* Border slate-800 */
+  --color-slate-900: #f8fafc; /* Card & root bg slate-900 becomes slate-50/100 */
+  --color-slate-950: #eef2f6; /* Extra dark inputs become extra light silver-blue */
+}
+
 body {
-  background-color: #0f172a;
-  color: #f1f5f9;
+  background-color: var(--color-slate-900);
+  color: var(--color-slate-100);
   font-family: var(--font-sans);
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .font-display {
