@@ -1,16 +1,6 @@
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { Profile, StudySession, UserAchievement, UserTitle, RankingItem, ACHIEVEMENTS } from './types';
 
-// Mock rivals to make the leaderboard alive and engaging even with a clean database or locally!
-const SEEDED_RIVALS = [
-  { nickname: '독서실요정 🧚‍♀️', selected_title: '집중 입문자', coins: 1420, today_min: 45, week_min: 320, total_min: 1200 },
-  { nickname: '프로밤샘러 ☕', selected_title: '공부 전사', coins: 3450, today_min: 130, week_min: 680, total_min: 2400 },
-  { nickname: '코인사냥꾼 🪙', selected_title: '기말고사 정복자', coins: 12500, today_min: 190, week_min: 980, total_min: 6200 },
-  { nickname: '공신이승기 🎓', selected_title: '중간고사 사냥꾼', coins: 4800, today_min: 80, week_min: 440, total_min: 3100 },
-  { nickname: '수능만점스나이퍼 🎯', selected_title: '수능 정복자', coins: 28900, today_min: 240, week_min: 1400, total_min: 18400 },
-  { nickname: '열공마스터 ⚡', selected_title: '전설의 학습자', coins: 65200, today_min: 310, week_min: 1980, total_min: 33400 }
-];
-
 // Helper to generate UUIDs in Local Mode
 function generateUUID() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
@@ -481,26 +471,31 @@ export class DBProvider {
         }
 
         // Map profiles to items
-        rawRankings = (profiles || []).map(p => {
-          const stats = userAggregations[p.id] || { today: 0, week: 0, total: 0 };
-          let scoreVal = 0;
-          if (type === 'today') {
-            scoreVal = p.id === userId ? todayMinutes : stats.today;
-          } else if (type === 'week') {
-            scoreVal = p.id === userId ? weeklyMinutes : stats.week;
-          } else if (type === 'total') {
-            scoreVal = p.id === userId ? totalMinutes : stats.total;
-          } else if (type === 'coins') {
-            scoreVal = p.coins;
-          }
+        rawRankings = (profiles || [])
+          .map(p => {
+            const stats = userAggregations[p.id] || { today: 0, week: 0, total: 0 };
+            const uTotal = p.id === userId ? totalMinutes : stats.total;
+            let scoreVal = 0;
+            if (type === 'today') {
+              scoreVal = p.id === userId ? todayMinutes : stats.today;
+            } else if (type === 'week') {
+              scoreVal = p.id === userId ? weeklyMinutes : stats.week;
+            } else if (type === 'total') {
+              scoreVal = p.id === userId ? totalMinutes : stats.total;
+            } else if (type === 'coins') {
+              scoreVal = p.coins;
+            }
 
-          return {
-            nickname: p.nickname,
-            selected_title: p.selected_title || '첫걸음 학습자',
-            value: scoreVal,
-            is_user: p.id === userId
-          };
-        });
+            return {
+              userId: p.id,
+              nickname: p.nickname,
+              selected_title: p.selected_title || '첫걸음 학습자',
+              value: scoreVal,
+              is_user: p.id === userId,
+              totalForFilter: uTotal
+            };
+          })
+          .filter(item => item.totalForFilter > 0);
 
       } catch (err) {
         console.error('Supabase rankings aggregate failed, falling back to overlay:', err);
@@ -519,55 +514,41 @@ export class DBProvider {
       startOfWeek.setHours(0, 0, 0, 0);
       const startOfWeekTime = startOfWeek.getTime();
 
-      rawRankings = Object.values(profiles).map(p => {
-        const uSessions = sessions.filter(s => s.user_id === p.id);
-        const localStats = {
-          today: uSessions.filter(s => new Date(s.started_at).getTime() >= startOfToday).reduce((sum, s) => sum + s.duration_minutes, 0),
-          week: uSessions.filter(s => new Date(s.started_at).getTime() >= startOfWeekTime).reduce((sum, s) => sum + s.duration_minutes, 0),
-          total: uSessions.reduce((sum, s) => sum + s.duration_minutes, 0)
-        };
+      rawRankings = Object.values(profiles)
+        .map(p => {
+          const uSessions = sessions.filter(s => s.user_id === p.id);
+          const localStats = {
+            today: uSessions.filter(s => new Date(s.started_at).getTime() >= startOfToday).reduce((sum, s) => sum + s.duration_minutes, 0),
+            week: uSessions.filter(s => new Date(s.started_at).getTime() >= startOfWeekTime).reduce((sum, s) => sum + s.duration_minutes, 0),
+            total: uSessions.reduce((sum, s) => sum + s.duration_minutes, 0)
+          };
 
-        let scoreVal = 0;
-        if (type === 'today') {
-          scoreVal = p.id === userId ? todayMinutes : localStats.today;
-        } else if (type === 'week') {
-          scoreVal = p.id === userId ? weeklyMinutes : localStats.week;
-        } else if (type === 'total') {
-          scoreVal = p.id === userId ? totalMinutes : localStats.total;
-        } else if (type === 'coins') {
-          scoreVal = p.coins;
-        }
+          const uTotal = p.id === userId ? totalMinutes : localStats.total;
+          let scoreVal = 0;
+          if (type === 'today') {
+            scoreVal = p.id === userId ? todayMinutes : localStats.today;
+          } else if (type === 'week') {
+            scoreVal = p.id === userId ? weeklyMinutes : localStats.week;
+          } else if (type === 'total') {
+            scoreVal = p.id === userId ? totalMinutes : localStats.total;
+          } else if (type === 'coins') {
+            scoreVal = p.coins;
+          }
 
-        return {
-          nickname: p.nickname,
-          selected_title: p.selected_title || '첫걸음 학습자',
-          value: scoreVal,
-          is_user: p.id === userId
-        };
-      });
+          return {
+            userId: p.id,
+            nickname: p.nickname,
+            selected_title: p.selected_title || '첫걸음 학습자',
+            value: scoreVal,
+            is_user: p.id === userId,
+            totalForFilter: uTotal
+          };
+        })
+        .filter(item => item.totalForFilter > 0);
     }
 
-    // Always merge in our pre-seeded active rivals to populate the tables beautifully!
-    // This provides a delightful gaming feeling, showing high rankings and motivating users.
+    // Only keep real players in the lists as requested
     const mergedList = [...rawRankings];
-
-    SEEDED_RIVALS.forEach(rival => {
-      // Avoid duplicate nicknames if any
-      if (!mergedList.some(r => r.nickname === rival.nickname)) {
-        let rivalVal = 0;
-        if (type === 'today') rivalVal = rival.today_min;
-        else if (type === 'week') rivalVal = rival.week_min;
-        else if (type === 'total') rivalVal = rival.total_min;
-        else if (type === 'coins') rivalVal = rival.coins;
-
-        mergedList.push({
-          nickname: rival.nickname,
-          selected_title: rival.selected_title,
-          value: rivalVal,
-          is_user: false
-        });
-      }
-    });
 
     // Sort by value descending and calculate rank
     mergedList.sort((a, b) => b.value - a.value);
@@ -577,5 +558,278 @@ export class DBProvider {
       rank: index + 1,
       ...item
     }));
+  }
+
+  // Delete/Manage user record from leaderboard (Developer administrative tool)
+  static async deleteUserRecord(targetUserId: string): Promise<boolean> {
+    if (this.isSupabase()) {
+      try {
+        await supabase!.from('study_sessions').delete().eq('user_id', targetUserId);
+        await supabase!.from('user_achievements').delete().eq('user_id', targetUserId);
+        await supabase!.from('user_titles').delete().eq('user_id', targetUserId);
+        const { error } = await supabase!.from('profiles').delete().eq('id', targetUserId);
+        if (error) throw error;
+        return true;
+      } catch (err) {
+        console.error('Failed to delete user in Supabase mode:', err);
+        throw err;
+      }
+    } else {
+      try {
+        const profiles = getLocalItem<Record<string, Profile>>('quest_profiles', {});
+        const sessions = getLocalItem<StudySession[]>('quest_sessions', []);
+        const titles = getLocalItem<UserTitle[]>('quest_titles', []);
+        const achievements = getLocalItem<UserAchievement[]>('quest_achievements', []);
+
+        if (profiles[targetUserId]) {
+          delete profiles[targetUserId];
+          setLocalItem('quest_profiles', profiles);
+        }
+
+        const updatedSessions = sessions.filter(s => s.user_id !== targetUserId);
+        setLocalItem('quest_sessions', updatedSessions);
+
+        const updatedTitles = titles.filter(t => t.user_id !== targetUserId);
+        setLocalItem('quest_titles', updatedTitles);
+
+        const updatedAchievements = achievements.filter(a => a.user_id !== targetUserId);
+        setLocalItem('quest_achievements', updatedAchievements);
+
+        // Also clean up quest_users
+        const users = getLocalItem<any[]>('quest_users', []);
+        const updatedUsers = users.filter(u => u.id !== targetUserId);
+        setLocalItem('quest_users', updatedUsers);
+
+        return true;
+      } catch (err) {
+        console.error('Failed to delete user in Local mode:', err);
+        throw err;
+      }
+    }
+  }
+
+  // Fetch detailed info of all users for developer panel
+  static async getAllUsersAdminData(): Promise<any[]> {
+    if (this.isSupabase()) {
+      try {
+        const { data: profiles, error: pErr } = await supabase!
+          .from('profiles')
+          .select('id, nickname, coins, selected_title, created_at');
+        if (pErr) throw pErr;
+
+        const { data: sessions, error: sErr } = await supabase!
+          .from('study_sessions')
+          .select('user_id, duration_minutes');
+        if (sErr) throw sErr;
+
+        const { data: titles, error: tErr } = await supabase!
+          .from('user_titles')
+          .select('user_id, title');
+        if (tErr) throw tErr;
+
+        return (profiles || []).map(p => {
+          const userSessions = (sessions || []).filter(s => s.user_id === p.id);
+          const totalMins = userSessions.reduce((sum, s) => sum + s.duration_minutes, 0);
+          const userTitles = (titles || []).filter(t => t.user_id === p.id).map(t => t.title);
+          
+          return {
+            id: p.id,
+            nickname: p.nickname,
+            coins: p.coins || 0,
+            selected_title: p.selected_title || '첫걸음 학습자',
+            total_minutes: totalMins,
+            session_count: userSessions.length,
+            titles_list: Array.from(new Set(['초련의 학습자', ...userTitles])),
+            created_at: p.created_at
+          };
+        });
+      } catch (err) {
+        console.error('getAllUsersAdminData Supabase failed:', err);
+        // Fallback to local if something fails so we have an uninterrupted experience
+        const profiles = getLocalItem<Record<string, Profile>>('quest_profiles', {});
+        return Object.values(profiles).map(p => ({
+          id: p.id,
+          nickname: p.nickname,
+          coins: p.coins || 0,
+          selected_title: p.selected_title || '첫걸음 학습자',
+          total_minutes: 0,
+          session_count: 0,
+          titles_list: ['초련의 학습자'],
+          created_at: p.created_at
+        }));
+      }
+    } else {
+      const profiles = getLocalItem<Record<string, Profile>>('quest_profiles', {});
+      const sessions = getLocalItem<StudySession[]>('quest_sessions', []);
+      const titles = getLocalItem<UserTitle[]>('quest_titles', []);
+
+      return Object.values(profiles).map(p => {
+        const userSessions = sessions.filter(s => s.user_id === p.id);
+        const totalMins = userSessions.reduce((sum, s) => sum + s.duration_minutes, 0);
+        const userTitles = titles.filter(t => t.user_id === p.id).map(t => t.title);
+
+        return {
+          id: p.id,
+          nickname: p.nickname,
+          coins: p.coins || 0,
+          selected_title: p.selected_title || '첫걸음 학습자',
+          total_minutes: totalMins,
+          session_count: userSessions.length,
+          titles_list: Array.from(new Set(['초련의 학습자', ...userTitles])),
+          created_at: p.created_at
+        };
+      });
+    }
+  }
+
+  // Admin Grant Coins
+  static async grantCoinsToUser(targetUserId: string, coinsAmount: number): Promise<boolean> {
+    if (this.isSupabase()) {
+      try {
+        const { data: profile, error: fetchErr } = await supabase!
+          .from('profiles')
+          .select('coins')
+          .eq('id', targetUserId)
+          .single();
+        if (fetchErr) throw fetchErr;
+
+        const currentCoins = profile?.coins || 0;
+        const { error } = await supabase!
+          .from('profiles')
+          .update({ coins: currentCoins + coinsAmount })
+          .eq('id', targetUserId);
+        if (error) throw error;
+        return true;
+      } catch (err) {
+        console.error('Failed to grant coins to user in Supabase:', err);
+        throw err;
+      }
+    } else {
+      const profiles = getLocalItem<Record<string, Profile>>('quest_profiles', {});
+      if (profiles[targetUserId]) {
+        profiles[targetUserId].coins = (profiles[targetUserId].coins || 0) + coinsAmount;
+        setLocalItem('quest_profiles', profiles);
+        return true;
+      }
+      return false;
+    }
+  }
+
+  // Admin Grant Time (injects a study session)
+  static async grantTimeToUser(targetUserId: string, minutesAmount: number): Promise<boolean> {
+    if (this.isSupabase()) {
+      try {
+        const newSession = {
+          user_id: targetUserId,
+          started_at: new Date(Date.now() - minutesAmount * 60000).toISOString(),
+          ended_at: new Date().toISOString(),
+          duration_minutes: minutesAmount,
+          earned_coins: 0,
+          created_at: new Date().toISOString()
+        };
+        const { error } = await supabase!
+          .from('study_sessions')
+          .insert(newSession);
+        if (error) throw error;
+        return true;
+      } catch (err) {
+        console.error('Failed to grant study hours in Supabase:', err);
+        throw err;
+      }
+    } else {
+      const sessions = getLocalItem<StudySession[]>('quest_sessions', []);
+      const newSession: StudySession = {
+        id: 'session_' + Math.random().toString(36).substring(2, 9),
+        user_id: targetUserId,
+        started_at: new Date(Date.now() - minutesAmount * 60000).toISOString(),
+        ended_at: new Date().toISOString(),
+        duration_minutes: minutesAmount,
+        earned_coins: 0,
+        created_at: new Date().toISOString()
+      };
+      sessions.push(newSession);
+      setLocalItem('quest_sessions', sessions);
+      return true;
+    }
+  }
+
+  // Admin Reset Specific Category data
+  static async adminResetCategory(targetUserId: string, category: 'today' | 'week' | 'total' | 'coins'): Promise<boolean> {
+    if (this.isSupabase()) {
+      try {
+        if (category === 'today') {
+          const now = new Date();
+          const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+          const { error } = await supabase!
+            .from('study_sessions')
+            .delete()
+            .eq('user_id', targetUserId)
+            .gte('started_at', startOfToday);
+          if (error) throw error;
+        } else if (category === 'week') {
+          const now = new Date();
+          const day = now.getDay();
+          const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+          const startOfWeek = new Date(now.setDate(diff));
+          startOfWeek.setHours(0, 0, 0, 0);
+          const { error } = await supabase!
+            .from('study_sessions')
+            .delete()
+            .eq('user_id', targetUserId)
+            .gte('started_at', startOfWeek.toISOString());
+          if (error) throw error;
+        } else if (category === 'total') {
+          const { error } = await supabase!
+            .from('study_sessions')
+            .delete()
+            .eq('user_id', targetUserId);
+          if (error) throw error;
+        } else if (category === 'coins') {
+          const { error } = await supabase!
+            .from('profiles')
+            .update({ coins: 0 })
+            .eq('id', targetUserId);
+          if (error) throw error;
+        }
+        return true;
+      } catch (err) {
+        console.error('Failed to reset user category in Supabase:', err);
+        throw err;
+      }
+    } else {
+      try {
+        if (category === 'coins') {
+          const profiles = getLocalItem<Record<string, Profile>>('quest_profiles', {});
+          if (profiles[targetUserId]) {
+            profiles[targetUserId].coins = 0;
+            setLocalItem('quest_profiles', profiles);
+          }
+        } else {
+          const sessions = getLocalItem<StudySession[]>('quest_sessions', []);
+          const now = new Date();
+          const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+          const day = now.getDay();
+          const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+          const startOfWeek = new Date(now.setDate(diff));
+          startOfWeek.setHours(0, 0, 0, 0);
+          const startOfWeekTime = startOfWeek.getTime();
+
+          let filtered: StudySession[] = [];
+          if (category === 'today') {
+            filtered = sessions.filter(s => !(s.user_id === targetUserId && new Date(s.started_at).getTime() >= startOfToday));
+          } else if (category === 'week') {
+            filtered = sessions.filter(s => !(s.user_id === targetUserId && new Date(s.started_at).getTime() >= startOfWeekTime));
+          } else if (category === 'total') {
+            filtered = sessions.filter(s => s.user_id !== targetUserId);
+          }
+          setLocalItem('quest_sessions', filtered);
+        }
+        return true;
+      } catch (err) {
+        console.error('Failed to reset user category in Local mode:', err);
+        throw err;
+      }
+    }
   }
 }

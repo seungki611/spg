@@ -25,11 +25,13 @@ import {
   Edit2,
   Plus,
   Sun,
-  Moon
+  Moon,
+  Store
 } from 'lucide-react';
 import { DBProvider } from './dbProvider';
 import { supabase } from './supabaseClient';
 import { ACHIEVEMENTS, Profile, StudySession, UserAchievement, UserTitle, RankingItem } from './types';
+import { AVATARS, getEvolutionStageIndex } from './avatars';
 
 // Safe LocalStorage helper for Sandboxed iFrame Environment
 const safeLocalStorage = {
@@ -82,17 +84,58 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [isSupabaseMode, setIsSupabaseMode] = useState(false);
 
-  // Tab State: 'dashboard' | 'history' | 'achievements' | 'rankings' | 'profile'
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'achievements' | 'rankings' | 'profile'>('dashboard');
+  // Tab State: 'dashboard' | 'history' | 'achievements' | 'rankings' | 'profile' | 'shop'
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'achievements' | 'rankings' | 'profile' | 'shop'>('dashboard');
+  const [historySubTab, setHistorySubTab] = useState<'time' | 'coins'>('time');
 
   // Timer State
   const [isTimerRunning, setIsTimerRunning] = useState(false);
   const [timerStartedAt, setTimerStartedAt] = useState<string | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
+  // Time and Reward Multipliers State
+  const [timeSpeedMultiplier, setTimeSpeedMultiplier] = useState<number>(1);
+  const [goldRateMultiplier, setGoldRateMultiplier] = useState<number>(1);
+
+  // Shop Upgrades Inventory State
+  const [shopUpgrades, setShopUpgrades] = useState<{
+    timeSpeedLimit: number;
+    goldRateLimit: number;
+    auroraWings: boolean;
+    steamCrown: boolean;
+  }>(() => {
+    try {
+      const stored = safeLocalStorage.getItem('coinquest_shop_upgrades');
+      if (stored) return JSON.parse(stored);
+    } catch (_) {}
+    return {
+      timeSpeedLimit: 1, // Max allowed multiplier (purchasable progression: 1, 5, 10, 120)
+      goldRateLimit: 1,  // Max allowed multiplier (purchasable progression: 1, 2, 3, 5)
+      auroraWings: false,
+      steamCrown: false
+    };
+  });
+
+  // Sync shop upgrades to local storage
+  useEffect(() => {
+    safeLocalStorage.setItem('coinquest_shop_upgrades', JSON.stringify(shopUpgrades));
+  }, [shopUpgrades]);
+
+  // Hook multipliers into active speed states when loaded
+  useEffect(() => {
+    // When shop unlocks higher speeds, make default multiplier active
+    setTimeSpeedMultiplier(1);
+    setGoldRateMultiplier(shopUpgrades.goldRateLimit);
+  }, [shopUpgrades]);
+
   // Test Utilities / Sandbox Mode Toggles
   const [cheatSpeedEnabled, setCheatSpeedEnabled] = useState(false); // 1s real = 1m gamified
   const [sandboxVisible, setSandboxVisible] = useState(true);
+  const [rushDurationInput, setRushDurationInput] = useState<number>(10);
+  const [coinRushRemaining, setCoinRushRemaining] = useState<number>(0);
+  const [timeRushRemaining, setTimeRushRemaining] = useState<number>(0);
+  const [coinRushMultInput, setCoinRushMultInput] = useState<number>(3);
+  const [timeRushMultInput, setTimeRushMultInput] = useState<number>(120);
 
   // Auth Inputs
   const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
@@ -115,6 +158,7 @@ export default function App() {
     baseCoins: number;
     bonusCoins: number;
     totalCoins: number;
+    isCoinRush?: boolean;
   } | null>(null);
   const [bossClearCelebration, setBossClearCelebration] = useState<{
     bossName: string;
@@ -126,6 +170,205 @@ export default function App() {
   // Profile Edit fields
   const [newNickname, setNewNickname] = useState('');
   const [profileSaving, setProfileSaving] = useState(false);
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
+
+  // --- Avatar Selection States ---
+  const [selectedAvatarKey, setSelectedAvatarKey] = useState<string>('leon');
+
+  // --- Remember Login Info State ---
+  const [rememberMe, setRememberMe] = useState(true);
+
+  // --- Admin User Directory Control Panel States (Developer Exclusive) ---
+  const [adminUserList, setAdminUserList] = useState<any[]>([]);
+  const [adminPanelSubTab, setAdminPanelSubTab] = useState<'directory' | 'debug_magic'>('directory');
+  const [selectedAdminId, setSelectedAdminId] = useState<string>('');
+  const [adminUserSearchQuery, setAdminUserSearchQuery] = useState('');
+  const [grantCoinsInput, setGrantCoinsInput] = useState<number>(10000);
+  const [grantHoursInput, setGrantHoursInput] = useState<number>(4);
+
+  // Sync selected avatar on user loaded
+  useEffect(() => {
+    if (currentUser) {
+      const stored = safeLocalStorage.getItem(`quest_selected_avatar_${currentUser.id}`) || 'leon';
+      setSelectedAvatarKey(stored);
+    }
+  }, [currentUser]);
+
+  // Sync saved login credentials on startup
+  useEffect(() => {
+    const savedEmail = safeLocalStorage.getItem('coinquest_remembered_email') || '';
+    const savedPwd = safeLocalStorage.getItem('coinquest_remembered_password') || '';
+    if (savedEmail) {
+      setEmail(savedEmail);
+      setPassword(savedPwd);
+    }
+  }, []);
+
+  // Compute active evolving companion avatar details
+  const activeAvatarDef = useMemo(() => {
+    const av = AVATARS.find(a => a.key === selectedAvatarKey) || AVATARS[0];
+    const stageIdx = getEvolutionStageIndex(achievements.length);
+    const activeStage = av.stages[stageIdx] || av.stages[0];
+    return {
+      definition: av,
+      stage: activeStage,
+      stageIndex: stageIdx
+    };
+  }, [selectedAvatarKey, achievements]);
+
+  const handleSelectAvatar = (avKey: string) => {
+    if (!currentUser) return;
+    setSelectedAvatarKey(avKey);
+    safeLocalStorage.setItem(`quest_selected_avatar_${currentUser.id}`, avKey);
+    showToast(`🐾 아바타 파트너가 '${AVATARS.find(a => a.key === avKey)?.name}'(으)로 동기화되었습니다!`, 'success');
+  };
+
+  // Admin Refresher for all users information
+  const loadAdminUserData = async () => {
+    if (currentUser?.email === 'seungki611@gmail.com') {
+      try {
+        const users = await DBProvider.getAllUsersAdminData();
+        setAdminUserList(users);
+        if (users.length > 0 && !selectedAdminId) {
+          setSelectedAdminId(users[0].id);
+        }
+      } catch (err) {
+        console.error('Failed to query admin user structures:', err);
+      }
+    }
+  };
+
+  const handleAdminGrantCoins = async (targetId: string, amount: number) => {
+    try {
+      await DBProvider.grantCoinsToUser(targetId, amount);
+      showToast(`🪙 대상 모험가에게 금마법 골드 +${amount.toLocaleString()} 닢을 성공적으로 수여했습니다!`, 'success');
+      await loadAdminUserData();
+      if (targetId === currentUser?.id) {
+        await checkUserSession();
+        await loadUserData();
+      }
+    } catch (err) {
+      showToast('골드 마력 부여 중 지맥 결손 오류발생.', 'error');
+    }
+  };
+
+  const handleAdminGrantTime = async (targetId: string, hours: number) => {
+    try {
+      const minutes = Math.round(hours * 60);
+      await DBProvider.grantTimeToUser(targetId, minutes);
+      showToast(`⏱️ 대상 모험가에게 전투 시간 +${hours}공헌시간(약 ${minutes}분)을 주입 완료했습니다!`, 'success');
+      await loadAdminUserData();
+      if (targetId === currentUser?.id) {
+        await checkUserSession();
+        await loadUserData();
+      }
+    } catch (err) {
+      showToast('시간 공헌치 주입 마력 전계 결속 오류 발생.', 'error');
+    }
+  };
+
+  const handleAdminGrantCoinRush = async (targetId: string, durationMinutes: number, multiplier: number = 3) => {
+    try {
+      if (durationMinutes <= 0) {
+        showToast('러쉬 부여 시간은 1분 이상이어야 합니다.', 'error');
+        return;
+      }
+      const expiry = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+      localStorage.setItem(`quest_coin_rush_until_${targetId}`, expiry);
+      localStorage.setItem(`quest_coin_rush_mult_${targetId}`, String(multiplier));
+      
+      const foundUser = adminUserList.find(u => u.id === targetId);
+      const nickname = foundUser ? foundUser.nickname : '모험가';
+      showToast(`🪙 [코인 러쉬] ${nickname}님에게 ${durationMinutes}분간의 ${multiplier}배 수확 가호가 성공적으로 부여되었습니다!`, 'success');
+      
+      await loadAdminUserData();
+      if (targetId === currentUser?.id) {
+        setCoinRushRemaining(durationMinutes * 60);
+      }
+    } catch (err) {
+      showToast('코인 러쉬 가호 부여 중 신비로운 마력 왜곡 발생.', 'error');
+    }
+  };
+
+  const handleAdminGrantTimeRush = async (targetId: string, durationMinutes: number, multiplier: number = 120) => {
+    try {
+      if (durationMinutes <= 0) {
+        showToast('러쉬 부여 시간은 1분 이상이어야 합니다.', 'error');
+        return;
+      }
+      const expiry = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+      localStorage.setItem(`quest_time_rush_until_${targetId}`, expiry);
+      localStorage.setItem(`quest_time_rush_mult_${targetId}`, String(multiplier));
+      
+      const foundUser = adminUserList.find(u => u.id === targetId);
+      const nickname = foundUser ? foundUser.nickname : '모험가';
+      showToast(`⚡ [시간 러쉬] ${nickname}님에게 ${durationMinutes}분간의 ${multiplier}배속 축적 가호가 성공적으로 부여되었습니다!`, 'success');
+      
+      await loadAdminUserData();
+      if (targetId === currentUser?.id) {
+        setTimeRushRemaining(durationMinutes * 60);
+      }
+    } catch (err) {
+      showToast('시간 러쉬 가호 부여 중 신비로운 마력 왜곡 발생.', 'error');
+    }
+  };
+
+  const getCoinRushRemainingSec = (userId: string): number => {
+    try {
+      const expiry = localStorage.getItem(`quest_coin_rush_until_${userId}`);
+      if (!expiry) return 0;
+      const rem = Math.floor((new Date(expiry).getTime() - Date.now()) / 1000);
+      return rem > 0 ? rem : 0;
+    } catch (e) {
+      return 0;
+    }
+  };
+
+  const getTimeRushRemainingSec = (userId: string): number => {
+    try {
+      const expiry = localStorage.getItem(`quest_time_rush_until_${userId}`);
+      if (!expiry) return 0;
+      const rem = Math.floor((new Date(expiry).getTime() - Date.now()) / 1000);
+      return rem > 0 ? rem : 0;
+    } catch (e) {
+      return 0;
+    }
+  };
+
+  const checkTimeRushActive = (): boolean => {
+    if (!currentUser) return false;
+    try {
+      const expiry = localStorage.getItem(`quest_time_rush_until_${currentUser.id}`);
+      if (!expiry) return false;
+      return new Date(expiry).getTime() > Date.now();
+    } catch (e) {
+      return false;
+    }
+  };
+
+  // Poll Rushes every second to show real-time countdown
+  useEffect(() => {
+    if (!currentUser) {
+      setCoinRushRemaining(0);
+      setTimeRushRemaining(0);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const coinRem = getCoinRushRemainingSec(currentUser.id);
+      const timeRem = getTimeRushRemainingSec(currentUser.id);
+      setCoinRushRemaining(coinRem);
+      setTimeRushRemaining(timeRem);
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (currentUser?.email === 'seungki611@gmail.com') {
+      loadAdminUserData();
+    }
+  }, [currentUser, achievements, studySessions, titles]);
 
   // Custom Toast State (replaces iframe-incompatible window.alert)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
@@ -225,12 +468,13 @@ export default function App() {
         const nowMs = Date.now();
         const diffSecs = Math.floor((nowMs - startMs) / 1000);
 
-        if (cheatSpeedEnabled) {
-          // Accelerated Cheat Mode: 1 real-time second contributes 1 gamified minute
-          setElapsedSeconds(diffSecs * 60);
-        } else {
-          setElapsedSeconds(diffSecs);
-        }
+        // Check if Time Rush is active (120x speed)
+        const hasTimeRush = checkTimeRushActive();
+        const finalMultiplier = hasTimeRush 
+          ? 120 
+          : (cheatSpeedEnabled ? 60 : timeSpeedMultiplier);
+          
+        setElapsedSeconds(diffSecs * finalMultiplier);
       }, 1000);
     } else {
       if (intervalRef.current) clearInterval(intervalRef.current);
@@ -240,7 +484,7 @@ export default function App() {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [isTimerRunning, timerStartedAt, cheatSpeedEnabled]);
+  }, [isTimerRunning, timerStartedAt, cheatSpeedEnabled, timeSpeedMultiplier, timeRushRemaining]);
 
   // Compute stats dynamically from completed sessions
   const stats = useMemo(() => {
@@ -408,9 +652,25 @@ export default function App() {
         const user = await DBProvider.signUp(email, password, nickname.trim());
         setAuthSuccessMsg('회원가입 완료! 자동 환영 로그인을 시도합니다.');
         setCurrentUser(user);
+        
+        if (rememberMe) {
+          safeLocalStorage.setItem('coinquest_remembered_email', email);
+          safeLocalStorage.setItem('coinquest_remembered_password', password);
+        } else {
+          safeLocalStorage.removeItem('coinquest_remembered_email');
+          safeLocalStorage.removeItem('coinquest_remembered_password');
+        }
       } else {
         const user = await DBProvider.signIn(email, password);
         setCurrentUser(user);
+
+        if (rememberMe) {
+          safeLocalStorage.setItem('coinquest_remembered_email', email);
+          safeLocalStorage.setItem('coinquest_remembered_password', password);
+        } else {
+          safeLocalStorage.removeItem('coinquest_remembered_email');
+          safeLocalStorage.removeItem('coinquest_remembered_password');
+        }
       }
     } catch (err: any) {
       setAuthError(err.message || '인증 처리에 실패하였습니다.');
@@ -501,16 +761,27 @@ export default function App() {
       safeLocalStorage.removeItem('quest_timer_started_at');
       setLoading(true);
 
+      // Check for Coin Rush multiplier active state (3x payout boost)
+      let activeGoldMultiplier = goldRateMultiplier;
+      let isCoinRushActive = false;
+      const coinRushExpiry = localStorage.getItem(`quest_coin_rush_until_${currentUser.id}`);
+      if (coinRushExpiry) {
+        if (new Date(coinRushExpiry).getTime() > Date.now()) {
+          isCoinRushActive = true;
+          activeGoldMultiplier = activeGoldMultiplier * 3; // Triple rewards during coin rush!
+        }
+      }
+
       // Reward Calculations
-      // 1 minute = 1 Coin
-      const baseCoins = runtimeMin;
+      // 1 minute = 1 Coin, scaled by active gold payout rate multiplier
+      const baseCoins = Math.round(runtimeMin * activeGoldMultiplier);
       let bonusCoins = 0;
       if (runtimeMin >= 120) {
-        bonusCoins = 80;
+        bonusCoins = Math.round(80 * activeGoldMultiplier);
       } else if (runtimeMin >= 60) {
-        bonusCoins = 30;
+        bonusCoins = Math.round(30 * activeGoldMultiplier);
       } else if (runtimeMin >= 30) {
-        bonusCoins = 10;
+        bonusCoins = Math.round(10 * activeGoldMultiplier);
       }
 
       const totalEarned = baseCoins + bonusCoins;
@@ -529,7 +800,8 @@ export default function App() {
         minutes: runtimeMin,
         baseCoins,
         bonusCoins,
-        totalCoins: totalEarned
+        totalCoins: totalEarned,
+        isCoinRush: isCoinRushActive
       });
 
       // Reload profile & stats and trigger achievements check
@@ -610,9 +882,10 @@ export default function App() {
     }
   };
 
-  // Sandbox cheat loaders to ease validation
-  const injectMockStudySession = async (minutes: number) => {
-    if (!currentUser) return;
+  // Sandbox cheat loaders to ease validation - updated to take target/selected user parameter
+  const injectMockStudySession = async (targetUserId?: string, minutes: number = 60) => {
+    const activeUserId = targetUserId || currentUser?.id;
+    if (!activeUserId) return;
     try {
       setLoading(true);
       const now = new Date();
@@ -627,21 +900,27 @@ export default function App() {
       const earned = baseCoins + bonusCoins;
 
       await DBProvider.addStudySession(
-        currentUser.id,
+        activeUserId,
         past.toISOString(),
         now.toISOString(),
         minutes,
         earned
       );
 
-      setSessionFinishReward({
-        minutes,
-        baseCoins,
-        bonusCoins,
-        totalCoins: earned
-      });
+      const targetProfile = await DBProvider.getProfile(activeUserId);
+      const nickname = targetProfile ? targetProfile.nickname : '모험가';
+      showToast(`⚔️ [전투 수련기록 주입] ${nickname}님에게 +${minutes}분 집중 전적 및 +${earned}골드를 가산했습니다!`, 'success');
 
-      await triggerSyncAndAchievementsCheck(minutes);
+      await loadAdminUserData();
+      if (activeUserId === currentUser?.id) {
+        setSessionFinishReward({
+          minutes,
+          baseCoins,
+          bonusCoins,
+          totalCoins: earned
+        });
+        await triggerSyncAndAchievementsCheck(minutes);
+      }
     } catch (err) {
       console.error('Sandbox inject study fail:', err);
     } finally {
@@ -649,13 +928,20 @@ export default function App() {
     }
   };
 
-  const handleCoinsCheat = async () => {
-    if (!currentUser || !currentProfile) return;
+  const handleCoinsCheat = async (targetUserId?: string) => {
+    const activeUserId = targetUserId || currentUser?.id;
+    if (!activeUserId) return;
     try {
       setLoading(true);
-      const updatedCoins = (currentProfile.coins || 0) + 1000;
-      const upProfile = await DBProvider.updateProfile(currentUser.id, { coins: updatedCoins });
-      setCurrentProfile(upProfile);
+      const targetProfile = await DBProvider.getProfile(activeUserId);
+      if (!targetProfile) return;
+      const updatedCoins = (targetProfile.coins || 0) + 1000;
+      const upProfile = await DBProvider.updateProfile(activeUserId, { coins: updatedCoins });
+      if (activeUserId === currentUser?.id) {
+        setCurrentProfile(upProfile);
+      }
+      showToast(`🪙 대상 모험가의 국고에 황장 골드 +1,000 주입을 완료했습니다!`, 'success');
+      await loadAdminUserData();
     } catch (err) {
       console.error('Sandbox coin cheat failure:', err);
     } finally {
@@ -663,17 +949,26 @@ export default function App() {
     }
   };
 
-  // Developer Super Cheat Action
-  const handleDeveloperSuperCheat = async () => {
-    if (!currentUser || !currentProfile) return;
+  // Developer Super Cheat Action - parameterized
+  const handleDeveloperSuperCheat = async (targetUserId?: string) => {
+    const activeUserId = targetUserId || currentUser?.id;
+    if (!activeUserId) return;
     try {
       setLoading(true);
+      const targetProfile = await DBProvider.getProfile(activeUserId);
+      if (!targetProfile) {
+        showToast('대상 모험가의 프로필을 탐색하지 못했습니다.', 'error');
+        return;
+      }
+
       // Give 1,000,000 coins + set supreme GM Title
-      const upProfile = await DBProvider.updateProfile(currentUser.id, { 
-        coins: (currentProfile.coins || 0) + 1000000,
+      const upProfile = await DBProvider.updateProfile(activeUserId, { 
+        coins: (targetProfile.coins || 0) + 1000000,
         selected_title: '👑 총괄 게임마스터 GM (개발자)'
       });
-      setCurrentProfile(upProfile);
+      if (activeUserId === currentUser?.id) {
+        setCurrentProfile(upProfile);
+      }
       
       // Inject all titles in DB for swift game testing
       if (isSupabaseMode && supabase) {
@@ -682,7 +977,7 @@ export default function App() {
             if (ach.rewardTitle) {
               await supabase
                 .from('user_titles')
-                .insert({ user_id: currentUser.id, title: ach.rewardTitle });
+                .insert({ user_id: activeUserId, title: ach.rewardTitle });
             }
           } catch (e) {
             // ignore duplicate entries
@@ -691,7 +986,7 @@ export default function App() {
           try {
             await supabase
               .from('user_achievements')
-              .insert({ user_id: currentUser.id, achievement_key: ach.key });
+              .insert({ user_id: activeUserId, achievement_key: ach.key });
           } catch (e) {
             // ignore duplicate entries
           }
@@ -705,24 +1000,131 @@ export default function App() {
           titlesLocal = [];
         }
         
+        const achievementsRaw = safeLocalStorage.getItem('quest_achievements') || '[]';
+        let achievementsLocal = [];
+        try {
+          achievementsLocal = JSON.parse(achievementsRaw);
+        } catch (e) {
+          achievementsLocal = [];
+        }
+
         ACHIEVEMENTS.forEach(ach => {
-          if (ach.rewardTitle && !titlesLocal.some((t: any) => t.user_id === currentUser.id && t.title === ach.rewardTitle)) {
+          if (ach.rewardTitle && !titlesLocal.some((t: any) => t.user_id === activeUserId && t.title === ach.rewardTitle)) {
             titlesLocal.push({ 
               id: 'dev-' + Math.random().toString(36).substr(2, 9), 
-              user_id: currentUser.id, 
+              user_id: activeUserId, 
               title: ach.rewardTitle, 
               created_at: new Date().toISOString() 
             });
           }
+          if (!achievementsLocal.some((a: any) => a.user_id === activeUserId && a.achievement_key === ach.key)) {
+            achievementsLocal.push({
+              id: 'dev-ach-' + Math.random().toString(36).substr(2, 9),
+              user_id: activeUserId,
+              achievement_key: ach.key,
+              achieved_at: new Date().toISOString()
+            });
+          }
         });
         safeLocalStorage.setItem('quest_titles', JSON.stringify(titlesLocal));
+        safeLocalStorage.setItem('quest_achievements', JSON.stringify(achievementsLocal));
       }
       
-      await loadUserData();
-      showToast('⚡ [총괄 개발자 GM 권한 활성화] 1,000,000 골드 지급 및 전 서버 타이틀 올클리어가 반영되었습니다!', 'success');
+      await loadAdminUserData();
+      if (activeUserId === currentUser?.id) {
+        await loadUserData();
+      }
+      showToast(`⚡ '${targetProfile.nickname}' 모험가에게 GM 권한 부여 및 전 서버 타이틀 잠금해제가 반영되었습니다!`, 'success');
     } catch (err: any) {
       console.error('Developer super cheat fail:', err);
       showToast('개발자 치트 처리 중 에러가 발생했습니다: ' + err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Developer exclusive action to delete rankings records
+  const handleDeleteRankingUser = async (targetUserId: string, nickname: string) => {
+    try {
+      setLoading(true);
+      await DBProvider.deleteUserRecord(targetUserId);
+      setDeletingUserId(null);
+      showToast(`⚡ '${nickname}' 모험가의 모든 전적을 제거하고 명예의 전당 보드에서 축출하였습니다.`, 'success');
+      // reload rankings
+      await loadRankings();
+    } catch (err: any) {
+      console.error('Failed to delete ranking user:', err);
+      showToast('모험가 전적 축출 중 오류가 발생했습니다: ' + err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Developer exclusive action to reset user individual categories (today, week, total, coins)
+  const handleAdminResetCategory = async (targetUserId: string, nickname: string, category: 'today' | 'week' | 'total' | 'coins') => {
+    let catName = '';
+    if (category === 'today') catName = '일일 격투 (오늘 시간)';
+    if (category === 'week') catName = '주간 원정 (이번주 시간)';
+    if (category === 'total') catName = '저널의 공적 (누적 시간)';
+    if (category === 'coins') catName = '부의 축적 (보유 골드)';
+
+    if (confirm(`⚠️ 정말로 [${nickname}] 모험가의 [${catName}] 데이터를 초기화하여 삭제 조치하시겠습니까?`)) {
+      try {
+        setLoading(true);
+        await DBProvider.adminResetCategory(targetUserId, category);
+        showToast(`✨ '${nickname}' 모험가의 [${catName}] 전적이 완전히 초기화 소멸되었습니다.`, 'success');
+        await loadRankings();
+        if (targetUserId === currentUser?.id) {
+          await checkUserSession();
+          await loadUserData();
+        }
+      } catch (err: any) {
+        console.error('Failed to reset category:', err);
+        showToast('전적 삭제 중 오류가 발생했습니다: ' + err.message, 'error');
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  // Purchase Shop Upgrades
+  const handleBuyItem = async (itemId: string, cost: number) => {
+    if (!currentUser || !currentProfile) return;
+    if (currentProfile.coins < cost) {
+      showToast('🪙 보유한 골드가 부족하여 물품 계약을 개시할 수 없습니다! 수련 세션을 완료하여 골드를 더 축적하십시오.', 'error');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const remainingCoins = currentProfile.coins - cost;
+
+      // Update backend profile coins
+      const updatedProfile = await DBProvider.updateProfile(currentUser.id, { coins: remainingCoins });
+      setCurrentProfile(updatedProfile);
+
+      // Mutate corresponding shop purchase state
+      setShopUpgrades((prev) => {
+        const next = { ...prev };
+        if (itemId === 'speed_5') next.timeSpeedLimit = Math.max(next.timeSpeedLimit, 5);
+        if (itemId === 'speed_10') next.timeSpeedLimit = Math.max(next.timeSpeedLimit, 10);
+        if (itemId === 'speed_120') next.timeSpeedLimit = Math.max(next.timeSpeedLimit, 120);
+        
+        if (itemId === 'gold_1_5') next.goldRateLimit = Math.max(next.goldRateLimit, 1.5);
+        if (itemId === 'gold_2_5') next.goldRateLimit = Math.max(next.goldRateLimit, 2.5);
+        if (itemId === 'gold_5_0') next.goldRateLimit = Math.max(next.goldRateLimit, 5.0);
+        
+        if (itemId === 'wings') next.auroraWings = true;
+        if (itemId === 'crown') next.steamCrown = true;
+        
+        return next;
+      });
+
+      showToast(`🎁 상점 장비 물품 전수 계약 완료! 수혜가 활성화되었습니다.`, 'success');
+      await triggerSyncAndAchievementsCheck();
+    } catch (err: any) {
+      console.error('Shop purchase failed:', err);
+      showToast('상점 계약 성문화 중 신비로운 전송 저항 발생: ' + err.message, 'error');
     } finally {
       setLoading(false);
     }
@@ -1039,6 +1441,18 @@ export default function App() {
                   />
                 </div>
 
+                <div className="flex items-center justify-between py-1 px-1 select-none">
+                  <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-450 hover:text-slate-300 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={rememberMe}
+                      onChange={(e) => setRememberMe(e.target.checked)}
+                      className="rounded border-slate-800 bg-slate-950 text-indigo-600 focus:ring-0 focus:ring-offset-0 w-4 h-4 cursor-pointer"
+                    />
+                    <span>🛡️ 로그인 신원 기록 보존하기 (자동 채우기)</span>
+                  </label>
+                </div>
+
                 {authTab === 'register' && (
                   <div>
                     <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase font-mono tracking-wider font-display">사용할 닉네임</label>
@@ -1143,6 +1557,7 @@ export default function App() {
               </button>
 
               <button
+                id="nav_profile"
                 onClick={() => setActiveTab('profile')}
                 className={`flex items-center gap-2 py-2.5 px-3.5 sm:px-5 rounded-xl text-xs font-bold font-display tracking-wide transition-all cursor-pointer whitespace-nowrap ${
                   activeTab === 'profile'
@@ -1152,6 +1567,19 @@ export default function App() {
               >
                 <User className="w-4 h-4" />
                 모험가 설정 & 칭호
+              </button>
+
+              <button
+                id="nav_shop"
+                onClick={() => setActiveTab('shop')}
+                className={`flex items-center gap-2 py-2.5 px-3.5 sm:px-5 rounded-xl text-xs font-bold font-display tracking-wide transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'shop'
+                    ? 'bg-amber-500 text-slate-950 font-black shadow-lg shadow-amber-500/10 border border-amber-400/20'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Store className="w-4 h-4" />
+                🏪 길드 상점 (Shop)
               </button>
             </div>
 
@@ -1185,9 +1613,160 @@ export default function App() {
                         {isTimerRunning ? (cheatSpeedEnabled ? '⏩ 60배속 비상 게이지 가속' : '⏱️ 실시간 시간 축적') : '출격 대기'}
                       </div>
 
+                      {/* Top buffer space */}
+                      <div className="h-6 w-full" />
+
+                      {/* Selected Evolved Avatar display inside Timer pane (SUPERSIZED) */}
+                      {(() => {
+                        const currentAvatar = AVATARS.find(a => a.key === selectedAvatarKey) || AVATARS[0];
+                        const avatarStageIdx = getEvolutionStageIndex(achievements.length);
+                        const currentStage = currentAvatar.stages[avatarStageIdx] || currentAvatar.stages[0];
+                        const auraWingsActive = shopUpgrades.auroraWings;
+                        const steamCrownActive = shopUpgrades.steamCrown;
+
+                        return (
+                          <div className="flex flex-col items-center gap-3.5 bg-slate-950/80 p-5 rounded-[2rem] border-2 border-indigo-500/20 w-full max-w-sm my-3.5 relative overflow-hidden group shadow-xl">
+                            {/* Theme backdrop glow */}
+                            <div className={`absolute -inset-10 bg-gradient-to-tr ${currentAvatar.themeColor} opacity-[0.12] blur-xl group-hover:scale-110 transition-all duration-500`} />
+                            
+                            {/* Aurora wings animation backdrop */}
+                            {auraWingsActive && (
+                              <div className="absolute inset-y-0 w-full flex justify-between items-center px-6 pointer-events-none z-0">
+                                <span className="text-4xl animate-[pulse_1.5s_infinite] select-none text-fuchsia-400">🦋</span>
+                                <span className="text-4xl animate-[pulse_1.5s_infinite] select-none text-sky-400">🦋</span>
+                              </div>
+                            )}
+
+                            {/* Main Avatar Character - STUNNINGLY LARGE */}
+                            <div className="relative">
+                              {/* Steam Crown floating above character */}
+                              {steamCrownActive && (
+                                <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-2xl select-none animate-[bounce_1.8s_infinite] drop-shadow-[0_4px_8px_rgba(251,191,36,0.6)] z-10">
+                                  👑
+                                </div>
+                              )}
+
+                              <div className={`w-28 h-28 rounded-full flex items-center justify-center bg-gradient-to-br ${currentAvatar.themeColor} text-5xl shadow-lg border-4 border-white/20 shrink-0 transform transition-transform group-hover:scale-105 duration-300 relative z-10 animate-[bounce_4s_infinite]`}>
+                                {currentStage.emoji}
+                                {/* Active status pulse shield */}
+                                <span className={`absolute inset-0 rounded-full border-2 ${isTimerRunning ? 'border-red-500 animate-ping opacity-60' : 'border-indigo-400/30 animate-pulse'}`} />
+                              </div>
+                            </div>
+
+                            <div className="text-center relative z-10 w-full">
+                              <div className="flex items-center justify-center gap-1 mb-1">
+                                <span className="text-[9px] font-black text-indigo-300 bg-indigo-500/20 px-2 py-0.5 rounded border border-indigo-400/20 font-mono">
+                                  STAGE {currentStage.stage}
+                                </span>
+                                <span className="text-[9px] font-black text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full border border-amber-500/20">
+                                  진화 수호수
+                                </span>
+                              </div>
+                              <h4 className="text-white font-extrabold text-sm tracking-tight">
+                                {currentStage.name}
+                              </h4>
+                              <p className="text-[10px] text-slate-400 italic mt-1 leading-normal max-w-[280px] mx-auto truncate">
+                                "{currentStage.description}"
+                              </p>
+                              
+                              {/* Live companion voice bubble depending on timer state */}
+                              <div className="mt-2.5 bg-slate-900/90 border border-slate-805 rounded-xl py-1.5 px-3 text-[10px] text-slate-355 shadow-md">
+                                <span className="text-indigo-400 font-extrabold mr-1">{currentAvatar.name.split(' ')[1] || '레온'}:</span>
+                                <span>
+                                  {isTimerRunning 
+                                    ? `공부 배속 ${timeSpeedMultiplier}배 집중 중! 보스 정벌까지 남은 체력을 집중하삼!`
+                                    : `출진 준비 끝! 새로운 집중 전투 기록을 개시하십시오!`
+                                  }
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                       {/* Giant digital timer display */}
-                      <div className="text-[5.5rem] sm:text-[7rem] md:text-[8rem] font-black leading-none tracking-tighter text-indigo-400 drop-shadow-[0_10px_15px_rgba(0,0,0,0.5)] my-12 font-mono flex items-center justify-center selection:bg-indigo-600/55">
+                      <div className="text-[5.5rem] sm:text-[7rem] md:text-[8rem] font-black leading-none tracking-tighter text-indigo-400 drop-shadow-[0_10px_15px_rgba(0,0,0,0.5)] my-5 font-mono flex items-center justify-center selection:bg-indigo-600/55 select-none">
                         {isTimerRunning ? formatTime(elapsedSeconds) : '00:00:00'}
+                      </div>
+
+                      {/* Active Rush indicators */}
+                      {(coinRushRemaining > 0 || timeRushRemaining > 0) && (
+                        <div className="flex flex-wrap items-center justify-center gap-2 mb-4">
+                          {coinRushRemaining > 0 && (
+                            <motion.div
+                              animate={{ scale: [1, 1.05, 1] }}
+                              transition={{ repeat: Infinity, duration: 2 }}
+                              className="bg-amber-500/15 border-2 border-amber-500/35 text-amber-400 font-extrabold text-[11px] px-3 py-1 rounded-full flex items-center gap-1.5 shadow-[0_0_12px_rgba(245,158,11,0.2)] font-mono"
+                            >
+                              <span className="animate-spin text-xs" style={{ animationDuration: '3s' }}>🪙</span>
+                              <span>코인 러쉬: 3배 수확 중!</span>
+                              <span className="bg-slate-950 px-1.5 py-0.5 rounded text-[10px] text-slate-350 shrink-0">
+                                {Math.floor(coinRushRemaining / 60)}분 {String(coinRushRemaining % 60).padStart(2, '0')}초
+                              </span>
+                            </motion.div>
+                          )}
+                          {timeRushRemaining > 0 && (
+                            <motion.div
+                              animate={{ scale: [1, 1.05, 1] }}
+                              transition={{ repeat: Infinity, duration: 1.5 }}
+                              className="bg-purple-500/15 border-2 border-purple-500/35 text-purple-400 font-extrabold text-[11px] px-3 py-1 rounded-full flex items-center gap-1.5 shadow-[0_0_12px_rgba(168,85,247,0.2)] font-mono"
+                            >
+                              <span className="animate-pulse text-xs">⚡</span>
+                              <span>시간 러쉬: 120배 가속 중!</span>
+                              <span className="bg-slate-950 px-1.5 py-0.5 rounded text-[10px] text-slate-350 shrink-0">
+                                {Math.floor(timeRushRemaining / 60)}분 {String(timeRushRemaining % 60).padStart(2, '0')}초
+                              </span>
+                            </motion.div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Multiplier controller bento */}
+                      <div className="w-full max-w-sm bg-slate-950/70 p-4 rounded-3xl border border-slate-800/80 my-3 text-xs">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-slate-400 font-bold font-mono text-[10px] uppercase tracking-wider flex items-center gap-1">
+                            ⚡ 집중 전장 배속 설정기
+                          </span>
+                          <span className="text-indigo-400 font-bold font-mono text-[11px]">
+                            현재 {timeSpeedMultiplier}배속 {isTimerRunning && '(적용 중)'}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-4 gap-1.5 select-none">
+                          {[1, 5, 10, 120].map((spd) => {
+                            const isSelected = timeSpeedMultiplier === spd;
+                            const isLocked = spd > shopUpgrades.timeSpeedLimit;
+
+                            return (
+                              <button
+                                key={spd}
+                                type="button"
+                                disabled={isTimerRunning}
+                                onClick={() => {
+                                  if (isLocked) {
+                                    showToast(`🏪 상점에서 전설의 가속의 모음서를 골드로 구매하면 최대 ${spd}배속 가속 혜택이 영구 잠금해제됩니다!`, 'info');
+                                  } else {
+                                    setTimeSpeedMultiplier(spd);
+                                    showToast(`⚡ 시간 가속율이 ${spd}배속으로 성공적으로 조율되었습니다!`, 'success');
+                                  }
+                                }}
+                                className={`py-1.5 px-1 rounded-xl text-center font-bold font-mono text-[11px] truncate flex flex-col items-center justify-center relative cursor-pointer border transition-all ${
+                                  isLocked 
+                                    ? 'bg-slate-950/40 border-slate-900 border-dashed text-slate-600'
+                                    : isSelected
+                                      ? 'bg-indigo-600 border-indigo-400 text-white shadow-md font-extrabold'
+                                      : 'bg-slate-900 border-slate-850 hover:bg-slate-800 text-slate-400'
+                                } ${isTimerRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
+                              >
+                                <span className={isSelected ? 'text-white' : 'text-slate-350'}>{spd}x</span>
+                                {isLocked && <span className="text-[8px] text-amber-500 font-bold">🔒 Lock</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[9.5px] text-slate-500 mt-2 font-mono leading-relaxed text-center">
+                          * 모래시계 레벨이 높을수록 타이머 눈금이 가속 축적됩니다. {isTimerRunning && '집중 진행 중에는 배속을 임의 조정할 수 없습니다.'}
+                        </p>
                       </div>
 
                       <p className="text-slate-400 font-bold mb-8 uppercase tracking-[0.25em] text-xs opacity-90 text-center font-display">
@@ -1215,6 +1794,87 @@ export default function App() {
                           </button>
                         )}
                       </div>
+
+                      {/* Co-Study Live Group Display */}
+                      {isTimerRunning && (
+                        <div className="w-full mt-5 bg-slate-950/50 p-3.5 rounded-2xl border border-slate-800/80 animate-fade-in w-full max-w-sm">
+                          <div className="flex items-center gap-1.5 mb-2.5">
+                            <span className="relative flex h-1.5 w-1.5">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75 animate-bounce"></span>
+                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-rose-500"></span>
+                            </span>
+                            <h4 className="text-[9.5px] font-black text-slate-400 uppercase tracking-widest font-mono">
+                              ⚔️ 실시간 동행 집중 수련단 (Co-Study Network)
+                            </h4>
+                          </div>
+
+                          <div className="space-y-2">
+                            {(() => {
+                              const peers = adminUserList.filter(u => u.id !== currentUser?.id);
+                              
+                              if (peers.length === 0) {
+                                const defaultPeers = [
+                                  { nickname: '새벽의 현자 아르곤', title: '우주 수호대장', avatarKey: 'geargar' },
+                                  { nickname: '집중요정 벨', title: '평화의 치유사', avatarKey: 'elphris' }
+                                ];
+                                return defaultPeers.map((dp, idx) => {
+                                  const av = AVATARS.find(a => a.key === dp.avatarKey) || AVATARS[0];
+                                  const st = av.stages[1];
+                                  const simulatedSpent = elapsedSeconds + (idx * 153) + 45;
+                                  return (
+                                    <div key={idx} className="flex items-center gap-2.5 bg-slate-900/60 p-2 rounded-xl border border-slate-850">
+                                      <div className={`w-8 h-8 rounded-full flex items-center justify-center bg-gradient-to-br ${av.themeColor} text-lg shadow-inner`}>
+                                        {st.emoji}
+                                      </div>
+                                      <div className="min-w-0 flex-1">
+                                        <p className="text-[10px] font-bold text-slate-200 truncate">{dp.nickname}</p>
+                                        <span className="text-[8px] text-slate-500 font-medium font-mono">ST.{st.stage} {st.name}</span>
+                                      </div>
+                                      <div className="text-right">
+                                        <span className="text-[9.5px] font-extrabold text-indigo-400 font-mono block">
+                                          {formatTime(simulatedSpent)}
+                                        </span>
+                                        <span className="text-[8px] text-emerald-400 font-bold block">🔥 집중 중</span>
+                                      </div>
+                                    </div>
+                                  );
+                                });
+                              }
+
+                              return peers.slice(0, 2).map((peer, idx) => {
+                                const peerTitle = peer.selected_title || '첫걸음 학습자';
+                                const peerAvatarKeys = ['luna', 'geargar', 'elphris', 'leon'];
+                                const assignedKey = peerAvatarKeys[idx % peerAvatarKeys.length];
+                                const av = AVATARS.find(a => a.key === assignedKey) || AVATARS[0];
+                                const peerStageIdx = getEvolutionStageIndex(peer.session_count || 1);
+                                const st = av.stages[peerStageIdx] || av.stages[0];
+                                const simulatedSpent = elapsedSeconds + (idx * 312) + 120;
+
+                                return (
+                                  <div key={peer.id} className="flex items-center gap-2.5 bg-slate-900/60 p-2 rounded-xl border border-slate-850">
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center bg-gradient-to-br ${av.themeColor} text-lg shadow-inner`}>
+                                      {st.emoji}
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-1">
+                                        <p className="text-[10px] font-bold text-slate-200 truncate">{peer.nickname}</p>
+                                        <span className="text-[8px] text-amber-500 font-black">[{peerTitle}]</span>
+                                      </div>
+                                      <span className="text-[8px] text-slate-500 font-medium font-mono">ST.{st.stage} {st.name}</span>
+                                    </div>
+                                    <div className="text-right">
+                                      <span className="text-[9.5px] font-extrabold text-indigo-400 font-mono block">
+                                        {formatTime(simulatedSpent)}
+                                      </span>
+                                      <span className="text-[8px] text-amber-400 font-bold block">🗡️ 동행 중</span>
+                                    </div>
+                                  </div>
+                                );
+                              });
+                            })()}
+                          </div>
+                        </div>
+                      )}
 
                       <div className="absolute -bottom-24 -right-24 w-64 h-64 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none" />
                     </div>
@@ -1308,7 +1968,22 @@ export default function App() {
                         <Shield className="w-36 h-36" />
                       </div>
                       <div>
-                        <div className="w-16 h-16 bg-gradient-to-br from-indigo-550 to-indigo-750 rounded-2xl mb-4 flex items-center justify-center text-3xl shadow-lg border border-indigo-500/30 select-none animate-pulse">🦁</div>
+                        {/* Dynamic Evolving Companion Avatar Slot */}
+                        <div className="flex items-center gap-3.5 mb-5 group cursor-pointer select-none" onClick={() => setActiveTab('profile')}>
+                          <div className={`w-16 h-16 bg-gradient-to-br ${activeAvatarDef.definition.themeColor} rounded-2xl flex items-center justify-center text-4xl shadow-xl border border-white/10 transform transition-transform group-hover:scale-105 group-hover:rotate-3 duration-500`}>
+                            {activeAvatarDef.stage.emoji}
+                          </div>
+                          <div>
+                            <span className="text-[9px] bg-slate-950 text-indigo-400 font-black px-2 py-0.5 rounded-full border border-indigo-500/20 font-mono uppercase tracking-wider">
+                              Stage {activeAvatarDef.stageIndex} Evolution
+                            </span>
+                            <div className="text-sm font-black text-white font-display mt-0.5 group-hover:text-indigo-400 transition-colors">
+                              {activeAvatarDef.stage.name}
+                            </div>
+                            <p className="text-[10px] text-slate-500 font-medium">장착 파트너: {activeAvatarDef.definition.name}</p>
+                          </div>
+                        </div>
+
                         <h2 className="text-2xl font-extrabold tracking-tight text-white font-display">
                           {currentProfile.nickname} 용사님
                         </h2>
@@ -1341,7 +2016,7 @@ export default function App() {
                     </div>
 
                     {/* Bento Card 8: Boss Quest Battle Status */}
-                    <div className="col-span-12 lg:col-span-8 bg-slate-900/60 border-2 border-slate-700/80 rounded-[2.5rem] p-6 sm:p-8 flex flex-col sm:flex-row items-center gap-6 sm:gap-8 relative overflow-hidden shadow-2xl backdrop-blur-md">
+                    <div className={`col-span-12 ${currentUser?.email === 'seungki611@gmail.com' ? 'lg:col-span-8' : 'lg:col-span-9'} bg-slate-900/60 border-2 border-slate-700/80 rounded-[2.5rem] p-6 sm:p-8 flex flex-col sm:flex-row items-center gap-6 sm:gap-8 relative overflow-hidden shadow-2xl backdrop-blur-md`}>
                       <div className="absolute inset-0 bg-red-500/5 pointer-events-none" />
                       <div className="w-28 h-28 sm:w-32 sm:h-32 flex-shrink-0 bg-red-955/40 rounded-full flex items-center justify-center text-5xl shadow-[0_0_50px_rgba(239,68,68,0.25)] select-none animate-pulse border border-red-500/10">
                         {currentBoss.key === 'first_study' ? '🦠' : 
@@ -1376,107 +2051,277 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Bento Card 9: Sandbox / Debug Cheat Tool Panel */}
-                    <div className="col-span-12 lg:col-span-4 bg-slate-900/35 border border-slate-800 rounded-[2rem] p-5 shadow-xl relative overflow-hidden backdrop-blur-md">
-                      <div className="flex items-center justify-between mb-3.5">
-                        <div className="flex items-center gap-1.5 text-amber-400 font-display">
-                          <Sliders className="w-4 h-4" />
-                          <h4 className="text-xs font-black uppercase tracking-wider">⚙️ 모험가 길드 보조 마법판 (테스트 전용)</h4>
+                    {/* Bento Card 9: Comprehensive Administrator Directory & Reward Center */}
+                    {currentUser?.email === 'seungki611@gmail.com' && (
+                      <div className="col-span-12 lg:col-span-4 bg-slate-900/35 border border-slate-800 rounded-[2rem] p-5 shadow-xl relative overflow-hidden backdrop-blur-md font-sans">
+                        <div className="flex items-center gap-1.5 text-rose-450 font-display mb-3.5">
+                          <Sliders className="w-4 h-4 text-rose-400" />
+                          <h4 className="text-xs font-black uppercase tracking-wider text-rose-400">🛡️ 시스템 관리자: 전체 모험가 정보조회 및 보상소</h4>
                         </div>
-                        <button
-                          onClick={() => setSandboxVisible(!sandboxVisible)}
-                          className="text-slate-400 hover:text-slate-200 text-[10px] underline cursor-pointer"
-                        >
-                          {sandboxVisible ? '비밀판 접기' : '비밀판 열기'}
-                        </button>
-                      </div>
 
-                      {sandboxVisible && (
                         <div className="space-y-3.5 text-xs">
-                          <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800/80 text-[10px] text-slate-400">
-                            💡 평가자 특혜: 칭호 해제 및 골드 지급을 신속하게 테스트해 보기 위한 전용 제어판입니다.
+                          <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800/80 text-[10px] text-slate-400 leading-relaxed uppercase font-mono">
+                            💡 master administration panel: query users, inject progress, grant coin/time rush boons.
                           </div>
 
-                          {/* Cheat Speed active toggle */}
-                          <div className="flex items-center justify-between bg-slate-950 p-2.5 rounded-lg border border-slate-805">
-                            <span className="font-semibold text-slate-300">⏱️ 가속의 모래시계 (60배속)</span>
-                            <button
-                              type="button"
-                              onClick={() => setCheatSpeedEnabled(!cheatSpeedEnabled)}
-                              className={`px-2.5 py-1 rounded text-[10px] font-bold cursor-pointer transition-colors ${
-                                cheatSpeedEnabled ? 'bg-emerald-600 text-white' : 'bg-slate-850 text-slate-400'
-                              }`}
-                            >
-                              {cheatSpeedEnabled ? '가속 온 (1초 = 1분)' : '가속 오프'}
-                            </button>
-                          </div>
-
-                          <div className="space-y-1.5">
-                            <span className="font-semibold text-[10px] text-slate-400 block tracking-wide uppercase font-mono">🔮 가상 집중 공적 주입</span>
-                            
-                            <div className="grid grid-cols-3 gap-1.5 font-display">
-                              <button
-                                type="button"
-                                onClick={() => injectMockStudySession(10)}
-                                className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
-                              >
-                                +10분 수련
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => injectMockStudySession(60)}
-                                className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
-                              >
-                                +1시간 수련
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => injectMockStudySession(180)}
-                                className="bg-indigo-950 hover:bg-slate-800 text-indigo-300 font-bold p-1.5 rounded text-[10px] border border-indigo-400/10 cursor-pointer"
-                              >
-                                +3시간 수련
-                              </button>
+                          {/* Search / selection inputs */}
+                          <div className="space-y-2">
+                            <label className="text-[11px] text-slate-400 font-bold block">🧙‍♂️ 대상 모험가 선택 및 검색</label>
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                placeholder="🔍 모험가 이름 검색..."
+                                value={adminUserSearchQuery}
+                                onChange={(e) => setAdminUserSearchQuery(e.target.value)}
+                                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-sans"
+                              />
+                              {adminUserSearchQuery && (
+                                <button
+                                  type="button"
+                                  onClick={() => setAdminUserSearchQuery('')}
+                                  className="px-2.5 bg-slate-800 hover:bg-slate-705 border border-slate-720 text-slate-300 rounded-lg text-xs cursor-pointer whitespace-nowrap"
+                                >
+                                  초기화
+                                </button>
+                              )}
                             </div>
-
-                            <div className="grid grid-cols-2 gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => injectMockStudySession(3000)} // Adds 50 hours!
-                                className="bg-rose-950 hover:bg-rose-900 text-rose-300 font-bold p-1.5 rounded text-[10px] border border-rose-400/20 cursor-pointer"
-                              >
-                                💀 +50시간 각성 대량 주입
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => injectMockStudySession(18000)} // Adds 300 hours!
-                                className="bg-violet-950 hover:bg-violet-900 text-violet-300 font-bold p-1.5 rounded text-[10px] border border-violet-400/25 cursor-pointer"
-                              >
-                                🌌 +300시간 무한 대각성 주입
-                              </button>
-                            </div>
+                            <select
+                              value={selectedAdminId}
+                              onChange={(e) => setSelectedAdminId(e.target.value)}
+                              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+                            >
+                              {(() => {
+                                const filteredList = adminUserList.filter(u => 
+                                  u.nickname.toLowerCase().includes(adminUserSearchQuery.toLowerCase())
+                                );
+                                return (
+                                  <>
+                                    <option value="">
+                                      -- 모험가를 선택하십시오 ({filteredList.length}명 검색됨) --
+                                    </option>
+                                    {filteredList.map(u => (
+                                      <option key={u.id} value={u.id}>
+                                        {u.nickname} ({u.id.substring(0, 6)}...) - {Math.round(u.total_minutes / 60)}시간 수련 / {u.coins.toLocaleString()}골드
+                                      </option>
+                                    ))}
+                                  </>
+                                );
+                              })()}
+                            </select>
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={handleCoinsCheat}
-                            className="w-full flex items-center justify-center gap-1.5 bg-amber-500/15 text-amber-400 border border-amber-500/30 font-bold py-1.5 px-3 rounded-lg cursor-pointer text-xs hover:bg-amber-500/25"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            🪙 금광 더미 채굴 (치트 골드 +1,000 획득)
-                          </button>
+                          {selectedAdminId && (() => {
+                            const tgUser = adminUserList.find(u => u.id === selectedAdminId);
+                            if (!tgUser) return null;
 
-                          {currentUser?.email === 'seungki611@gmail.com' && (
-                            <button
-                              type="button"
-                              onClick={handleDeveloperSuperCheat}
-                              className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-rose-500 via-purple-600 to-indigo-600 text-white font-black py-2.5 px-3 rounded-lg cursor-pointer text-xs hover:scale-[1.01] transition-transform shadow-lg glow-gold border border-pink-400/20 active:scale-95 duration-200"
-                            >
-                              <span>🛠️ [총괄 GM 개발자 특혜] 1백만 골드 & 모든 보스/칭호 잠금해제</span>
-                            </button>
-                          )}
+                            return (
+                              <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-850 text-[11px] space-y-2.5 font-sans">
+                                {/* Read statistics */}
+                                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                                  <div className="bg-slate-900/40 p-2 rounded border border-slate-800/60 font-sans">
+                                    <span className="text-slate-500 block text-[9px] uppercase font-bold">누적 전투시간 / 횟수</span>
+                                    <span className="text-white font-black font-mono">{Math.round(tgUser.total_minutes / 60)}시간 ({(tgUser.total_minutes).toFixed(1)}분)</span>
+                                    <span className="text-slate-400 block text-[9px] mt-0.5">총 {tgUser.session_count}세션 격파</span>
+                                  </div>
+                                  <div className="bg-slate-900/40 p-2 rounded border border-slate-800/60 font-sans">
+                                    <span className="text-slate-500 block text-[9px] uppercase font-bold">보유 골드 재화</span>
+                                    <span className="text-amber-400 font-black font-mono">{(tgUser.coins).toLocaleString()} 골드</span>
+                                    <span className="text-slate-400 block text-[9px] mt-0.5">칭호 {tgUser.titles_list ? tgUser.titles_list.length : 0}개 보유</span>
+                                  </div>
+                                </div>
+
+                                {/* Titles unlocked list */}
+                                <div>
+                                  <span className="text-slate-500 text-[10px] block font-bold mb-1">👑 획득한 명예 칭호 목록:</span>
+                                  <div className="flex flex-wrap gap-1">
+                                    {tgUser.titles_list && tgUser.titles_list.length > 0 ? (
+                                      tgUser.titles_list.map((title: string, idx: number) => (
+                                        <span key={idx} className="bg-indigo-950/40 border border-indigo-900 text-indigo-300 text-[9px] px-1.5 py-0.5 rounded font-bold">
+                                          {title}
+                                        </span>
+                                      ))
+                                    ) : (
+                                      <span className="text-slate-600 italic">획득한 칭호가 아직 없습니다</span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Award management tools */}
+                                <div className="space-y-3 pt-2 border-t border-slate-900">
+                                  {/* Award Coins & Hours Row */}
+                                  <div className="grid grid-cols-2 gap-2">
+                                    {/* Award Coins */}
+                                    <div>
+                                      <span className="text-[10px] text-slate-500 block font-bold">금마법 골드 수여</span>
+                                      <div className="flex items-center gap-1 mt-1">
+                                        <input
+                                          type="number"
+                                          value={grantCoinsInput}
+                                          onChange={(e) => setGrantCoinsInput(Number(e.target.value))}
+                                          className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-amber-400 font-bold text-xs font-mono"
+                                          placeholder="골드액"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleAdminGrantCoins(tgUser.id, grantCoinsInput)}
+                                          className="bg-amber-600 hover:bg-amber-500 text-slate-950 font-black px-2 py-1 rounded text-[10px] cursor-pointer"
+                                        >
+                                          부여
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {/* Award Time */}
+                                    <div>
+                                      <span className="text-[10px] text-slate-500 block font-bold">공헌 수련시간 수여</span>
+                                      <div className="flex items-center gap-1 mt-1">
+                                        <input
+                                          type="number"
+                                          value={grantHoursInput}
+                                          step="0.5"
+                                          onChange={(e) => setGrantHoursInput(Number(e.target.value))}
+                                          className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-emerald-400 font-bold text-xs font-mono"
+                                          placeholder="시간"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleAdminGrantTime(tgUser.id, grantHoursInput)}
+                                          className="bg-emerald-600 hover:bg-emerald-500 text-white font-black px-2 py-1 rounded text-[10px] cursor-pointer"
+                                        >
+                                          주입
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  {/* Custom Rush Blessings Section (Requested Feature) */}
+                                  <div className="bg-slate-900/60 p-2.5 rounded-xl border border-slate-850 space-y-2 mt-2">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[10.5px] text-indigo-300 font-bold block flex items-center gap-1">
+                                        ✨ 가호 버프 러쉬 부여
+                                      </span>
+                                      <div className="flex items-center gap-1">
+                                        <input
+                                          type="number"
+                                          value={rushDurationInput}
+                                          onChange={(e) => setRushDurationInput(Math.max(1, Number(e.target.value)))}
+                                          className="w-12 bg-slate-950 border border-slate-800 rounded px-1 py-0.5 text-center text-white font-bold text-[10px] font-mono"
+                                          min="1"
+                                        />
+                                        <span className="text-[9px] text-slate-400">분간</span>
+                                      </div>
+                                    </div>
+                                    
+                                    <div className="grid grid-cols-2 gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleAdminGrantCoinRush(tgUser.id, rushDurationInput)}
+                                        className="bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/25 font-bold py-1 px-1.5 rounded text-[9px] cursor-pointer flex items-center justify-center gap-1 transition-colors"
+                                      >
+                                        🪙 코인러쉬(3배)
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleAdminGrantTimeRush(tgUser.id, rushDurationInput)}
+                                        className="bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border border-purple-500/25 font-bold py-1 px-1.5 rounded text-[9px] cursor-pointer flex items-center justify-center gap-1 transition-colors"
+                                      >
+                                        ⚡ 시간러쉬(120배)
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* Quick Preset Study Injection (Consolidated from Magic Board) */}
+                                  <div className="space-y-1.5 mt-2">
+                                    <span className="font-bold text-[9px] text-slate-400 block tracking-wide uppercase font-mono">⚔️ 가상 수련기록 속성 주입 Presets</span>
+                                    <div className="grid grid-cols-3 gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => injectMockStudySession(tgUser.id, 10)}
+                                        className="bg-slate-900 hover:bg-slate-800 text-indigo-300 font-bold py-1 px-1 rounded text-[9px] border border-slate-800 cursor-pointer"
+                                      >
+                                        +10분
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => injectMockStudySession(tgUser.id, 60)}
+                                        className="bg-slate-900 hover:bg-slate-800 text-indigo-300 font-bold py-1 px-1 rounded text-[9px] border border-slate-800 cursor-pointer"
+                                      >
+                                        +1시간
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => injectMockStudySession(tgUser.id, 180)}
+                                        className="bg-slate-900 hover:bg-slate-800 text-indigo-300 font-bold py-1 px-1 rounded text-[9px] border border-slate-800 cursor-pointer"
+                                      >
+                                        +3시간
+                                      </button>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-11 pt-[2px]">
+                                      <button
+                                        type="button"
+                                        onClick={() => injectMockStudySession(tgUser.id, 3000)}
+                                        className="bg-rose-950/30 hover:bg-rose-900/40 text-rose-300 font-bold py-1 px-1.5 rounded text-[9px] border border-rose-500/15 cursor-pointer whitespace-nowrap"
+                                      >
+                                        💀 +50시간 각성
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => injectMockStudySession(tgUser.id, 18000)}
+                                        className="bg-violet-950/30 hover:bg-violet-900/40 text-violet-300 font-bold py-1 px-1.5 rounded text-[9px] border border-violet-500/15 cursor-pointer whitespace-nowrap"
+                                      >
+                                        🌌 +300시간 무한각성
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* GM Special Super Cheats (Consolidated from Magic Board) */}
+                                  <div className="space-y-1 mt-2.5 pt-2 border-t border-slate-900/60">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCoinsCheat(tgUser.id)}
+                                      className="w-full flex items-center justify-center gap-1 bg-amber-500/10 text-amber-400 border border-amber-500/20 font-bold py-1 px-2 rounded text-[9px] cursor-pointer hover:bg-amber-500/20"
+                                    >
+                                      <span>🪙 금광 더미 채굴 (치트 골드 +1,000 획득)</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeveloperSuperCheat(tgUser.id)}
+                                      className="w-full flex items-center justify-center gap-1.5 bg-gradient-to-r from-rose-600 via-purple-600 to-indigo-600 text-white font-black py-1.5 px-2 rounded-lg cursor-pointer text-[9px] hover:scale-[1.01] transition-transform shadow-md border border-pink-400/10 active:scale-95 duration-200"
+                                    >
+                                      <span>🛠️ [GM 특혜 수여] 1백만 골드 & 타이틀/전 보스 정복</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Warning delete button inside the developer panel */}
+                                <div className="pt-2 border-t border-slate-900/60">
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      if (confirm(`⚠️ 정말로 이 사용자(${tgUser.nickname})의 데이터베이스 내 모든 기록(공부 기입장, 칭호, 랭킹 및 프로필)을 완파 파쇄 지우시겠습니까? 복구는 불가능합니다.`)) {
+                                        try {
+                                          await DBProvider.deleteUserRecord(tgUser.id);
+                                          showToast(`💀 ${tgUser.nickname} 모험가를 성역에서 영구히 파쇄 처리 완료했습니다.`, 'success');
+                                          setSelectedAdminId('');
+                                          await loadAdminUserData();
+                                          await checkUserSession();
+                                        } catch (e) {
+                                          showToast('사용자 영구 파쇄 처리 중 신비로운 전극 오류 발생.', 'error');
+                                        }
+                                      }
+                                    }}
+                                    className="w-full bg-rose-950/65 hover:bg-rose-900 border border-rose-800/40 text-rose-300 font-bold py-1.5 px-3 rounded-lg text-[9px] cursor-pointer transition-all active:scale-95"
+                                  >
+                                    💥 이 모험가 계정 성역에서 영구 삭제 (추방 및 파쇄)
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
-                      )}
-                    </div>
+                      </div>
+                    )}
 
                   </motion.div>
                 )}
@@ -1491,79 +2336,107 @@ export default function App() {
                     transition={{ duration: 0.2 }}
                     className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl"
                   >
-                    <div className="flex flex-wrap justify-between items-center mb-6 gap-3">
+                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-3">
                       <div>
-                        <h3 className="text-lg font-bold font-display text-white">📖 모험 수행 기록 비급서 (Logs)</h3>
-                        <p className="text-xs text-slate-400 mt-1">모험가님이 이룩한 영광스럽고 불굴에 가득 찬 집중 전투 사냥 일지입니다.</p>
+                        <h3 className="text-lg font-bold font-display text-white">📖 통합 모험 수행 및 재화 수확 일지 (Quest Logs)</h3>
+                        <p className="text-xs text-slate-400 mt-1">집중 전투 수련 기록과 성소 보스 정벌 전리품 획득 일지가 하나로 일목요연하게 합쳐진 유서 깊은 실시간 모험담입니다.</p>
                       </div>
                       <div className="text-right">
                         <span className="text-xs font-semibold text-indigo-400 bg-indigo-500/10 px-3 py-1 rounded-full border border-indigo-500/20">
-                          총 전투 기록: {studySessions.length}회 완수
+                          총 {studySessions.length + achievements.length}건의 사적 기입 완료
                         </span>
                       </div>
                     </div>
 
-                    {studySessions.length === 0 ? (
-                      <div className="text-center py-16 border-2 border-dashed border-slate-800 rounded-2xl">
-                        <div className="inline-flex bg-slate-950 p-4 rounded-full text-slate-600 mb-3">
-                          <History className="w-8 h-8" />
-                        </div>
-                        <h4 className="text-slate-300 font-bold">일지에 기록된 완수 퀘스트 전적이 없습니다</h4>
-                        <p className="text-xs text-slate-500 max-w-sm mx-auto mt-2 leading-relaxed">
-                          타이머를 시작하여 전투에 집중하거나 대시보드 치트판을 통하여 가상 퀘스트 세션을 주입해 보십시오!
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left text-xs border-collapse">
-                          <thead>
-                            <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-mono">
-                              <th className="py-3 px-4 font-bold">날짜 / 모험 개시</th>
-                              <th className="py-3 px-4 font-bold">전투 종료</th>
-                              <th className="py-3 px-4 font-bold">지속 시간</th>
-                              <th className="py-3 px-4 font-bold">수확 전리품 (골드)</th>
-                              <th className="py-3 px-4 text-right font-bold">퀘스트 상태</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-850">
-                            {studySessions.map((session) => {
-                              const startDate = new Date(session.started_at);
-                              const endDate = new Date(session.ended_at);
-                              
-                              const dateStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2,'0')}-${String(startDate.getDate()).padStart(2,'0')}`;
-                              const startStr = `${String(startDate.getHours()).padStart(2,'0')}:${String(startDate.getMinutes()).padStart(2,'0')}:${String(startDate.getSeconds()).padStart(2,'0')}`;
-                              const endStr = `${String(endDate.getHours()).padStart(2,'0')}:${String(endDate.getMinutes()).padStart(2,'0')}:${String(endDate.getSeconds()).padStart(2,'0')}`;
+                    {(() => {
+                      // Compile both study sessions and achievements into a unified history timeline
+                      const unifiedLogs = [
+                        ...studySessions.map(session => ({
+                          id: `session_${session.id}`,
+                          date: new Date(session.started_at),
+                          type: '⚔️ 수련 집중 완료 (모험 수행)',
+                          description: `${session.duration_minutes}분 동안 수련을 격렬히 수행하고 보상을 적출하였습니다.`,
+                          coinsEarned: session.earned_coins,
+                          durationText: `${session.duration_minutes}분 집중`,
+                          statusType: '수련 격파',
+                          badgeColor: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
+                        })),
 
-                              return (
-                                <tr key={session.id} className="hover:bg-slate-850/50 transition-colors">
-                                  <td className="py-3.5 px-4 font-medium">
-                                    <span className="block text-slate-100 font-bold">{dateStr}</span>
-                                    <span className="text-[10px] text-slate-500 font-mono">{startStr}</span>
-                                  </td>
-                                  <td className="py-3.5 px-4 text-slate-400 font-mono">
-                                    {endStr}
-                                  </td>
-                                  <td className="py-3.5 px-4">
-                                    <span className="inline-flex bg-indigo-500/10 text-indigo-300 font-semibold px-2 py-0.5 rounded font-mono border border-indigo-500/20">
-                                      {session.duration_minutes}분 집중
-                                    </span>
-                                  </td>
-                                  <td className="py-3.5 px-4 font-bold text-amber-400 font-mono">
-                                    +{session.earned_coins} 🪙
-                                  </td>
-                                  <td className="py-3.5 px-4 text-right text-emerald-400 font-bold">
-                                    <span className="inline-flex items-center gap-1 text-[11px] bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
-                                      <Check className="w-3 h-3" />
-                                      격파 완료
-                                    </span>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+                        ...achievements.map(ach => {
+                          const def = ACHIEVEMENTS.find(a => a.key === ach.achievement_key);
+                          return {
+                            id: `ach_${ach.id}`,
+                            date: new Date(ach.unlocked_at),
+                            type: '👑 비전 마수 토벌 보상 (업적 달성)',
+                            description: `'${def?.name || ach.achievement_key}' 업적 달성 및 성소 수문장 영구 퇴치 완료.`,
+                            coinsEarned: def?.rewardCoins || 0,
+                            durationText: def?.rewardTitle || '전설의 업적',
+                            statusType: '왕관 영속수여',
+                            badgeColor: 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                          };
+                        })
+                      ];
+
+                      // Sort descending chronologically
+                      unifiedLogs.sort((a, b) => b.date.getTime() - a.date.getTime());
+
+                      return unifiedLogs.length === 0 ? (
+                        <div className="text-center py-16 border-2 border-dashed border-slate-800 rounded-2xl">
+                          <div className="inline-flex bg-slate-950 p-4 rounded-full text-slate-600 mb-3">
+                            <History className="w-8 h-8" />
+                          </div>
+                          <h4 className="text-slate-300 font-bold">통합 모험 서적에 기록된 역사가 없습니다</h4>
+                          <p className="text-xs text-slate-500 max-w-sm mx-auto mt-2 leading-relaxed">
+                            집중 수련 타이머를 활성화하여 공부에 전념하거나, 보스 격파 과업을 완료하여 전설 일지를 채워 보십시오!
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs border-collapse">
+                            <thead>
+                              <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider font-mono">
+                                <th className="py-3 px-4 font-bold">날짜 / 모험 시간</th>
+                                <th className="py-3 px-4 font-bold">사건 및 모험 구획</th>
+                                <th className="py-3 px-4 font-bold col-span-2">상세 내역 요강 및 가호 성과</th>
+                                <th className="py-3 px-4 text-right font-bold">하사된 전리품 (골드)</th>
+                                <th className="py-3 px-4 text-center font-bold">역사적 상태</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-850">
+                              {unifiedLogs.map((log) => {
+                                const logDate = log.date;
+                                const dateStr = `${logDate.getFullYear()}-${String(logDate.getMonth() + 1).padStart(2,'0')}-${String(logDate.getDate()).padStart(2,'0')}`;
+                                const timeStr = `${String(logDate.getHours()).padStart(2,'0')}:${String(logDate.getMinutes()).padStart(2,'0')}:${String(logDate.getSeconds()).padStart(2,'0')}`;
+
+                                return (
+                                  <tr key={log.id} className="hover:bg-slate-850/40 transition-colors">
+                                    <td className="py-3.5 px-4 font-medium">
+                                      <span className="block text-slate-100 font-bold">{dateStr}</span>
+                                      <span className="text-[10px] text-slate-500 font-mono">{timeStr}</span>
+                                    </td>
+                                    <td className="py-3.5 px-4">
+                                      <span className="font-bold text-slate-200 block text-[11px]">{log.type}</span>
+                                      <span className="text-[10px] text-slate-405 font-mono">{log.durationText}</span>
+                                    </td>
+                                    <td className="py-3.5 px-4 text-slate-400 text-xs" colSpan={1}>
+                                      {log.description}
+                                    </td>
+                                    <td className="py-3.5 px-4 text-right font-bold text-amber-400 font-mono text-[13px] whitespace-nowrap">
+                                      {log.coinsEarned > 0 ? `+${log.coinsEarned.toLocaleString()} 🪙` : '0 🪙'}
+                                    </td>
+                                    <td className="py-3.5 px-4 text-center">
+                                      <span className={`inline-flex items-center gap-1 text-[10.5px] px-2.5 py-0.5 rounded-full border font-bold ${log.badgeColor}`}>
+                                        {log.statusType}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()}
                   </motion.div>
                 )}
 
@@ -1623,17 +2496,26 @@ export default function App() {
                           ? (studySessions.length >= 1 ? 100 : 0)
                           : Math.min(100, Math.floor((cumulativeHours / ach.requiredHours) * 100));
 
-                        // Unique boss emojis
+                        // Unique boss emojis - designed to look incredibly cool and distinct for all 16 progression zones
                         const getBossEmoji = (key: string) => {
                           switch (key) {
-                            case 'first_study': return '🟢🦠'; // slime
-                            case 'focus_beginner': return '🤖🗿'; // golem
-                            case 'study_warrior': return '🦇👿'; // gargoyle
-                            case 'midterm_boss': return '🐲🔥'; // Red Dragon
-                            case 'final_boss': return '💀⚔️'; // Death Knight
-                            case 'csat_boss': return '🧙‍♂️🔮'; // Archpriest
-                            case 'legendary_student': return '⚡⚡⚡🏛️'; // Zeus
-                            default: return '👾';
+                            case 'first_study': return '🪵🤺'; // 1단계: 목각 연마인형
+                            case 'focus_beginner': return '🌬️🌫️'; // 2단계: 방해의 안개 정령
+                            case 'study_warrior': return '🦇🔥'; // 3단계: 잡념의 불나방 괴수
+                            case 'mind_master': return '🪨🧌'; // 4단계: 수련 동굴의 바위 파수꾼
+                            case 'midterm_boss': return '👿🌌'; // 5단계: 어둠의 나태 수호자
+                            case 'final_boss': return '❄️👻'; // 6단계: 학업 슬럼프의 서리 악령
+                            case 'csat_boss': return '🤺💀'; // 7단계: 한계 파멸의 고교 흑기사
+                            case 'legendary_student': return '🧙‍♂️🔮'; // 8단계: 고대 도서관의 환영 도플갱어
+                            case 'focus_specialist': return '⚡🪄'; // 9단계: 수문장 대마법사 지그문트
+                            case 'master_of_will': return '⚙️🌀'; // 10단계: 차원 왜곡의 태엽 수리 기어
+                            case 'time_destroyer': return '🐉⌛'; // 11단계: 시간의 절대 종단 크로노스
+                            case 'scholar_of_truth': return '👼🌈'; // 12단계: 진리 수련의 오색 빛 대천사
+                            case 'gatekeeper_of_abyss': return '👿🔥'; // 13단계: 심연의 어두운 학업마신 루시퍼
+                            case 'legendary_grandmaster': return '🏛️🌳'; // 14단계: 신지식의 숲의 군주 프로메테우스
+                            case 'academic_overseer': return '🦁💠'; // 15단계: 해달의 수수께끼 수호스핑크스
+                            case 'ultimate_deity': return '👑✨'; // 16단계: 은하 주신 아스트라에아
+                            default: return '👾🛸';
                           }
                         };
 
@@ -1803,6 +2685,9 @@ export default function App() {
                             <th className="py-3 px-4 font-bold text-right">
                               {rankingType === 'coins' ? '보유 골드' : '수련 집중 시간'}
                             </th>
+                            {currentUser?.email === 'seungki611@gmail.com' && (
+                              <th className="py-3 px-4 font-bold text-center">전적 관리</th>
+                            )}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-850">
@@ -1860,6 +2745,80 @@ export default function App() {
                                     formatMinutesReadable(rk.value)
                                   )}
                                 </td>
+                                {currentUser?.email === 'seungki611@gmail.com' && (
+                                  <td className="py-3.5 px-4 text-center">
+                                    {rk.is_user ? (
+                                      <span className="text-slate-500 text-[10px] select-none font-medium">본인 계정</span>
+                                    ) : (
+                                      <div className="flex items-center justify-center">
+                                        <div className="flex flex-col items-center gap-1 p-1 bg-slate-950/60 rounded-xl border border-slate-800">
+                                          {/* Categories reset tools */}
+                                          <div className="flex items-center gap-1">
+                                            <button
+                                              onClick={() => handleAdminResetCategory(rk.userId!, rk.nickname, 'today')}
+                                              title="⚔️ 일일 격투(오늘 수련시간) 초기화"
+                                              className="px-1.5 py-0.5 bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/30 text-indigo-300 font-bold text-[9px] rounded transition-colors whitespace-nowrap cursor-pointer"
+                                            >
+                                              일일
+                                            </button>
+                                            <button
+                                              onClick={() => handleAdminResetCategory(rk.userId!, rk.nickname, 'week')}
+                                              title="🗺️ 주간 원정(이번주 수련시간) 초기화"
+                                              className="px-1.5 py-0.5 bg-emerald-950 hover:bg-emerald-900 border border-emerald-500/30 text-emerald-300 font-bold text-[9px] rounded transition-colors whitespace-nowrap cursor-pointer"
+                                            >
+                                              주간
+                                            </button>
+                                            <button
+                                              onClick={() => handleAdminResetCategory(rk.userId!, rk.nickname, 'total')}
+                                              title="📜 저널의 공적(누적 수련시간) 초기화"
+                                              className="px-1.5 py-0.5 bg-amber-950 hover:bg-amber-900 border border-amber-500/30 text-amber-300 font-bold text-[9px] rounded transition-colors whitespace-nowrap cursor-pointer"
+                                            >
+                                              전체
+                                            </button>
+                                            <button
+                                              onClick={() => handleAdminResetCategory(rk.userId!, rk.nickname, 'coins')}
+                                              title="💰 부의 축적(골드) 초기화"
+                                              className="px-1.5 py-0.5 bg-rose-950 hover:bg-rose-900 border border-rose-500/30 text-rose-300 font-bold text-[9px] rounded transition-colors whitespace-nowrap cursor-pointer"
+                                            >
+                                              골드
+                                            </button>
+                                          </div>
+
+                                          <div className="w-full h-px bg-slate-800/40 my-0.5" />
+
+                                          {deletingUserId === rk.userId ? (
+                                            <div className="flex items-center gap-1">
+                                              <button
+                                                onClick={() => {
+                                                  if (rk.userId) {
+                                                    handleDeleteRankingUser(rk.userId, rk.nickname);
+                                                  }
+                                                }}
+                                                className="bg-red-600 hover:bg-red-500 text-white font-extrabold px-1.5 py-0.5 rounded text-[8px] cursor-pointer whitespace-nowrap animate-pulse"
+                                              >
+                                                확인
+                                              </button>
+                                              <button
+                                                onClick={() => setDeletingUserId(null)}
+                                                className="bg-slate-805 hover:bg-slate-705/85 text-slate-300 px-1.5 py-0.5 rounded text-[8px] cursor-pointer whitespace-nowrap"
+                                              >
+                                                취소
+                                              </button>
+                                            </div>
+                                          ) : (
+                                            <button
+                                              onClick={() => setDeletingUserId(rk.userId || null)}
+                                              title="💀 계정 및 모든 전적 영구 파쇄 삭제"
+                                              className="text-red-400 hover:text-red-300 font-bold text-[9px] cursor-pointer hover:underline mb-0.5"
+                                            >
+                                              💥 계정 자체 축출
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </td>
+                                )}
                               </tr>
                             );
                           })}
@@ -1868,7 +2827,7 @@ export default function App() {
                     </div>
 
                     <p className="text-[11px] text-slate-500 mt-4 leading-relaxed font-mono">
-                      * 월드 보드 안정화 마법 덕분에, 수련 자극과 극적인 모험 활기를 주기 위해 대륙의 쟁쟁한 가상 경쟁 모험가 6인이 명예의 서열판에 상시 동기화되어 경쟁을 펼칩니다!
+                      * 명예의 전당 서열판은 전 서버에서 수련 중인 실제 모험가들의 실시간 데이터를 기반으로 순위가 집계됩니다.
                     </p>
 
                   </motion.div>
@@ -2101,9 +3060,485 @@ export default function App() {
 
                     </div>
 
+                    {/* NEW COMPONENT: CUSTOM COMPANION AVATAR SELECTOR EXPOSITION */}
+                    <div className="md:col-span-3 bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl mt-6 relative overflow-hidden">
+                      <div className="absolute top-0 right-0 p-8 text-indigo-500/5 pointer-events-none">
+                        <Sparkles className="w-48 h-48" />
+                      </div>
+
+                      <div className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div>
+                          <span className="bg-indigo-600/15 text-indigo-450 font-extrabold text-[10px] px-3 py-1 rounded-full uppercase tracking-wider border border-indigo-500/20 font-mono">
+                            🐾 소울 가디언 파트너 시스템
+                          </span>
+                          <h3 className="text-xl sm:text-2xl font-black font-display text-white mt-1.5 flex items-center gap-2">
+                            ✨ 내 곁을 지키는 아바타 동반 소집소
+                          </h3>
+                          <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                            나만의 개성이 뚜렷한 수호신 파트너를 소집해 보십시오. 보스 토벌 퀘스트 수험 진도에 맞춰 아바타가 <strong>총 6단계에 걸쳐 찬란히 진화</strong>합니다.
+                            <br />
+                            아바타를 도중에 변경하더라도 달성해 놓은 공적(클리어 퀘스트 수)에 따른 진화 혜택은 실시간으로 고스란히 동기화됩니다!
+                          </p>
+                        </div>
+
+                        <div className="bg-slate-950 px-4 py-3 rounded-2xl border border-slate-800 text-right shrink-0">
+                          <p className="text-[10px] text-slate-500 font-bold uppercase font-mono">나의 보스 퀘스트 공적치</p>
+                          <p className="text-lg font-black text-indigo-400 font-mono">{achievements.length}개 보스 격파</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">현재 수호 정령 진화 수준: <span className="text-emerald-400 font-bold font-mono">Stage {getEvolutionStageIndex(achievements.length)}</span></p>
+                        </div>
+                      </div>
+
+                      {/* Main Avatar Selection Grid */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                        {AVATARS.map((av) => {
+                          const isSelected = selectedAvatarKey === av.key;
+                          const currentStageIdx = getEvolutionStageIndex(achievements.length);
+                          const activeStageOfThisAv = av.stages[currentStageIdx] || av.stages[0];
+
+                          return (
+                            <div
+                              key={av.key}
+                              className={`rounded-2xl border p-5 flex flex-col justify-between transition-all select-none relative ${
+                                isSelected
+                                  ? 'bg-slate-950 border-indigo-500 ring-2 ring-indigo-500/15 drop-shadow-xl'
+                                  : 'bg-slate-950/40 border-slate-850 hover:bg-slate-950/80 hover:border-slate-700'
+                              }`}
+                            >
+                              <div>
+                                {/* Active Badge & Selection tag */}
+                                <div className="flex items-center justify-between mb-4">
+                                  <span className="text-[10px] bg-slate-905 text-slate-350 font-bold px-2 py-0.5 rounded border border-slate-800 font-mono">
+                                    {av.badge}
+                                  </span>
+                                  {isSelected ? (
+                                    <span className="bg-gradient-to-r from-indigo-505 to-indigo-600 text-white font-bold text-[9px] px-2 py-0.5 rounded-full animate-pulse flex items-center gap-0.5 shadow-md">
+                                      <Check className="w-3 h-3 text-white fill-current shrink-0" /> 동행 중
+                                    </span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSelectAvatar(av.key)}
+                                      className="text-indigo-400 bg-indigo-550/10 hover:bg-indigo-500/20 text-[10px] font-bold px-2.5 py-1 rounded-full cursor-pointer transition-colors"
+                                    >
+                                      동행 계약
+                                    </button>
+                                  )}
+                                </div>
+
+                                {/* Avatar Large State Face */}
+                                <div className="flex flex-col items-center justify-center my-4 py-2 bg-gradient-to-b from-slate-900/50 to-slate-950/70 rounded-xl border border-slate-900/40 relative group">
+                                  {/* Evolution Stage Indicator Glow */}
+                                  <div className="text-6xl select-none animate-bounce" style={{ animationDuration: '4.5s' }}>
+                                    {activeStageOfThisAv.emoji}
+                                  </div>
+                                  <p className="text-xs font-black text-slate-100 mt-3 flex items-center gap-1">
+                                    {activeStageOfThisAv.name}
+                                  </p>
+                                  <span className="text-[9px] text-slate-505 font-mono mt-0.5 font-bold uppercase tracking-widest text-center">
+                                    Stage {currentStageIdx}
+                                  </span>
+                                </div>
+
+                                {/* Meta text */}
+                                <h4 className="text-sm font-extrabold text-white font-display mt-2">{av.name}</h4>
+                                <p className="text-[11px] text-indigo-300 font-medium italic mt-1 pb-2 border-b border-slate-900 leading-relaxed">
+                                  "{av.personality}"
+                                </p>
+                                <p className="text-[11px] text-slate-400 mt-2.5 leading-relaxed font-sans">
+                                  <strong className="text-slate-200">현재 수호 태세:</strong> {activeStageOfThisAv.description}
+                                </p>
+                              </div>
+
+                              {/* Tiny Encyclopedia Preview */}
+                              <div className="mt-4 pt-3.5 border-t border-slate-900">
+                                <span className="text-[9px] font-mono text-slate-500 block uppercase tracking-wide">🔍 6단계 진화 대전집</span>
+                                <div className="grid grid-cols-6 gap-0.5 mt-1.5 bg-slate-900/50 p-1 rounded-lg border border-slate-900">
+                                  {av.stages.map((stg) => {
+                                    const isUnlocked = stg.stage <= currentStageIdx;
+                                    return (
+                                      <div
+                                        key={stg.stage}
+                                        title={`[Stage ${stg.stage}] ${stg.name} - ${stg.description}`}
+                                        onClick={() => {
+                                          showToast(`🔬 [Stage ${stg.stage} - ${stg.name} 도감]: ${stg.description}`, 'info');
+                                        }}
+                                        className={`h-8 rounded-md flex items-center justify-center text-sm cursor-help relative transition-all ${
+                                          isUnlocked 
+                                            ? 'bg-slate-950 border border-indigo-500/30 font-bold hover:scale-105 hover:bg-indigo-900/20' 
+                                            : 'bg-slate-950/25 border border-slate-900 filter saturate-0 opacity-40 hover:opacity-100'
+                                        }`}
+                                      >
+                                        <span>{stg.emoji}</span>
+                                        {stg.stage === currentStageIdx && (
+                                          <span className="absolute -top-1 -right-1 w-1.5 h-1.5 bg-emerald-400 rounded-full" />
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
                   </motion.div>
                 )}
 
+                {/* 6. SHOPS BOARD PANEL */}
+                {activeTab === 'shop' && (
+                  <motion.div
+                    key="shop"
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    transition={{ duration: 0.2 }}
+                    className="space-y-6"
+                  >
+                    {/* Header Banner */}
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
+                      <div className="absolute top-0 right-0 w-80 h-80 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
+                      
+                      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 relative z-10">
+                        <div>
+                          <span className="bg-amber-500/15 text-amber-400 font-extrabold text-[10px] px-3 py-1 rounded-full uppercase tracking-wider border border-amber-500/20 font-mono">
+                            🏪 엘프라 성역 길드 보물창고
+                          </span>
+                          <h3 className="text-2xl font-black font-display text-white mt-1.5 flex items-center gap-2">
+                            🏪 황금 만능 물품 상점 (Guild Merchant Shop)
+                          </h3>
+                          <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                            공부 수련을 극대화시켜주는 <strong>전설의 시간 가속서</strong>와 동행 아바타 정령을 아름답게 치장할 수 있는 <strong>특수 연성 장식</strong>을 골드로 청약해 보십시오!
+                          </p>
+                        </div>
+
+                        {/* Gold Balance Box */}
+                        {currentProfile && (
+                          <div className="bg-slate-950 p-4 rounded-2xl border-2 border-amber-500/20 text-right shrink-0 min-w-[200px] shadow-lg">
+                            <p className="text-[10px] text-slate-500 font-bold uppercase font-mono">보유 중인 모험가 금고 잔고</p>
+                            <p className="text-2xl font-black text-amber-400 font-mono mt-0.5 flex items-center justify-end gap-1">
+                              <span>{currentProfile.coins.toLocaleString()}</span> <span className="text-xs font-bold text-slate-400">골드 (🪙)</span>
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Shop Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-stretch">
+                      
+                      {/* Left: Interactive Purchasable list */}
+                      <div className="col-span-12 lg:col-span-8 space-y-6">
+                        
+                        {/* Section 1: Speed Manuals */}
+                        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                          <h4 className="text-sm font-black text-slate-200 uppercase tracking-widest font-mono mb-4 flex items-center gap-2">
+                            ⚡ 전설의 비약 가속서 고서 및 배수 비지서
+                          </h4>
+                          
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            {/* Speed 5x upgrade */}
+                            {(() => {
+                              const isBought = shopUpgrades.timeSpeedLimit >= 5;
+                              const cost = 500;
+                              return (
+                                <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+                                  isBought ? 'bg-slate-950/40 border-slate-850' : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                                }`}>
+                                  <div>
+                                    <div className="flex justify-between items-start">
+                                      <span className="text-xs font-black text-indigo-300 font-display flex items-center gap-1">
+                                        📜 모래시계 마법 비약서 - [5배속] 
+                                      </span>
+                                      {isBought && <span className="bg-emerald-500/10 text-emerald-400 font-bold text-[8px] px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">전수 완료</span>}
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">타이머 공부 속도를 실시간 최대 5배속까지 해방할 수 있게 해주는 가속 연성서입니다.</p>
+                                  </div>
+                                  <div className="mt-4 pt-3 border-t border-slate-900 flex justify-between items-center">
+                                    <span className="text-xs font-bold text-amber-400 font-mono">{cost.toLocaleString()} 🪙</span>
+                                    <button
+                                      type="button"
+                                      disabled={isBought}
+                                      onClick={() => handleBuyItem('speed_5', cost)}
+                                      className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                                        isBought 
+                                          ? 'bg-slate-900 text-slate-600 cursor-not-allowed' 
+                                          : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-md active:scale-95'
+                                      }`}
+                                    >
+                                      {isBought ? '잠금 장치 해제됨' : '비법 전수'}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Speed 10x upgrade */}
+                            {(() => {
+                              const isBought = shopUpgrades.timeSpeedLimit >= 10;
+                              const isEligible = shopUpgrades.timeSpeedLimit >= 5;
+                              const cost = 1200;
+                              return (
+                                <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+                                  isBought ? 'bg-slate-950/40 border-slate-850' : !isEligible ? 'opacity-50' : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                                }`}>
+                                  <div>
+                                    <div className="flex justify-between items-start">
+                                      <span className="text-xs font-black text-indigo-300 font-display flex items-center gap-1">
+                                        📜 수련 영웅 대가속 비급 - [10배속]
+                                      </span>
+                                      {isBought ? (
+                                        <span className="bg-emerald-500/10 text-emerald-400 font-bold text-[8px] px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">전수 완료</span>
+                                      ) : !isEligible && (
+                                        <span className="text-slate-500 text-[8px] flex items-center gap-0.5">🔒 선행 비약 필요</span>
+                                      )}
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">전투 속도를 최대 10배 축적시킬 수 있는 고계위 마법 비지서입니다. 선행 5배속 전수가 필요합니다.</p>
+                                  </div>
+                                  <div className="mt-4 pt-3 border-t border-slate-900 flex justify-between items-center">
+                                    <span className="text-xs font-bold text-amber-400 font-mono">{cost.toLocaleString()} 🪙</span>
+                                    <button
+                                      type="button"
+                                      disabled={isBought || !isEligible}
+                                      onClick={() => handleBuyItem('speed_10', cost)}
+                                      className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                                        isBought 
+                                          ? 'bg-slate-900 text-slate-600 cursor-not-allowed' 
+                                          : !isEligible
+                                            ? 'bg-slate-900 text-slate-600 cursor-not-allowed'
+                                            : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-md active:scale-95'
+                                      }`}
+                                    >
+                                      {isBought ? '잠금 장치 해제됨' : '비법 전수'}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Speed 120x upgrade */}
+                            {(() => {
+                              const isBought = shopUpgrades.timeSpeedLimit >= 120;
+                              const isEligible = shopUpgrades.timeSpeedLimit >= 10;
+                              const cost = 5050;
+                              return (
+                                <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+                                  isBought ? 'bg-slate-950/40 border-slate-850' : !isEligible ? 'opacity-50' : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                                }`}>
+                                  <div>
+                                    <div className="flex justify-between items-start">
+                                      <span className="text-xs font-black text-rose-300 font-display flex items-center gap-1">
+                                        🌌 전설의 극초광속 마법서 - [120배속]
+                                      </span>
+                                      {isBought ? (
+                                        <span className="bg-emerald-500/10 text-emerald-400 font-bold text-[8px] px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">전수 완료</span>
+                                      ) : !isEligible && (
+                                        <span className="text-slate-500 text-[8px] flex items-center gap-0.5">🔒 선행 비약 필요</span>
+                                      )}
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">시간축의 왜곡을 일으켜 무려 1초당 2분(120배 가속)의 수련 시간을 누적시켜 가호 보상을 거둡니다.</p>
+                                  </div>
+                                  <div className="mt-4 pt-3 border-t border-slate-900 flex justify-between items-center">
+                                    <span className="text-xs font-bold text-amber-400 font-mono">{cost.toLocaleString()} 🪙</span>
+                                    <button
+                                      type="button"
+                                      disabled={isBought || !isEligible}
+                                      onClick={() => handleBuyItem('speed_120', cost)}
+                                      className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                                        isBought 
+                                          ? 'bg-slate-900 text-slate-600 cursor-not-allowed' 
+                                          : !isEligible
+                                            ? 'bg-slate-900 text-slate-600 cursor-not-allowed'
+                                            : 'bg-rose-600 hover:bg-rose-500 text-white shadow-md active:scale-95'
+                                      }`}
+                                    >
+                                      {isBought ? '잠금 장치 해제됨' : '시간 해방'}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Gold Multiplier 1.5x upgrade */}
+                            {(() => {
+                              const isBought = shopUpgrades.goldRateLimit >= 1.5;
+                              const cost = 600;
+                              return (
+                                <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+                                  isBought ? 'bg-slate-950/40 border-slate-850' : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                                }`}>
+                                  <div>
+                                    <div className="flex justify-between items-start">
+                                      <span className="text-xs font-black text-amber-300 font-display flex items-center gap-1">
+                                        🧪 황금 연성 전도율 - [수확 1.5배]
+                                      </span>
+                                      {isBought && <span className="bg-emerald-500/10 text-emerald-400 font-bold text-[8px] px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono font-mono font-bold">황금 연성됨</span>}
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">수련 완료 시 획득하는 모든 골드 수익률을 영구적으로 +50% (1.5배)로 재배 시키는 기초 마법식입니다.</p>
+                                  </div>
+                                  <div className="mt-4 pt-3 border-t border-slate-900 flex justify-between items-center">
+                                    <span className="text-xs font-bold text-amber-400 font-mono">{cost.toLocaleString()} 🪙</span>
+                                    <button
+                                      type="button"
+                                      disabled={isBought}
+                                      onClick={() => handleBuyItem('gold_1_5', cost)}
+                                      className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                                        isBought 
+                                          ? 'bg-slate-900 text-slate-600 cursor-not-allowed' 
+                                          : 'bg-amber-600 hover:bg-amber-500 text-slate-950 font-black shadow-md active:scale-95'
+                                      }`}
+                                    >
+                                      {isBought ? '연금술 활성화됨' : '제련 연성'}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Gold Multiplier 2.5x upgrade */}
+                            {(() => {
+                              const isBought = shopUpgrades.goldRateLimit >= 2.5;
+                              const isEligible = shopUpgrades.goldRateLimit >= 1.5;
+                              const cost = 1500;
+                              return (
+                                <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+                                  isBought ? 'bg-slate-950/40 border-slate-850' : !isEligible ? 'opacity-50' : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                                }`}>
+                                  <div>
+                                    <div className="flex justify-between items-start">
+                                      <span className="text-xs font-black text-amber-300 font-display flex items-center gap-1">
+                                        🧪 대현자의 골드 양 가속 - [수확 2.5배]
+                                      </span>
+                                      {isBought ? (
+                                        <span className="bg-emerald-500/10 text-emerald-400 font-bold text-[8px] px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">황금 연성됨</span>
+                                      ) : !isEligible && (
+                                        <span className="text-slate-500 text-[8px] flex items-center gap-0.5">🔒 선행 도식 필요</span>
+                                      )}
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">연성 효율의 임계치를 한층 더 끌어올려 무려 수련 보상을 2.5배(250%)로 영구 부스팅 시켜줍니다.</p>
+                                  </div>
+                                  <div className="mt-4 pt-3 border-t border-slate-900 flex justify-between items-center">
+                                    <span className="text-xs font-bold text-amber-400 font-mono">{cost.toLocaleString()} 🪙</span>
+                                    <button
+                                      type="button"
+                                      disabled={isBought || !isEligible}
+                                      onClick={() => handleBuyItem('gold_2_5', cost)}
+                                      className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                                        isBought 
+                                          ? 'bg-slate-900 text-slate-600 cursor-not-allowed' 
+                                          : !isEligible
+                                            ? 'bg-slate-900 text-slate-600 cursor-not-allowed'
+                                            : 'bg-amber-600 hover:bg-amber-500 text-slate-950 font-black shadow-md active:scale-95'
+                                      }`}
+                                    >
+                                      {isBought ? '연금술 활성화됨' : '제련 연성'}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Gold Multiplier 5.0x upgrade */}
+                            {(() => {
+                              const isBought = shopUpgrades.goldRateLimit >= 5.0;
+                              const isEligible = shopUpgrades.goldRateLimit >= 2.5;
+                              const cost = 3500;
+                              return (
+                                <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+                                  isBought ? 'bg-slate-950/40 border-slate-850' : !isEligible ? 'opacity-50' : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                                }`}>
+                                  <div>
+                                    <div className="flex justify-between items-start">
+                                      <span className="text-xs font-black text-yellow-300 font-display flex items-center gap-1">
+                                        🌟 마이더스 골드 연성 진수 - [수확 5.0배]
+                                      </span>
+                                      {isBought ? (
+                                        <span className="bg-emerald-500/10 text-emerald-400 font-bold text-[8px] px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">만능 연성됨</span>
+                                      ) : !isEligible && (
+                                        <span className="text-slate-500 text-[8px] flex items-center gap-0.5">🔒 선행 연성 필요</span>
+                                      )}
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">최고위 만능 제련 연성술. 수행하는 집중 공부 1분 한 회마다 5골드를 수확하는 경이로운 재화 마법입니다.</p>
+                                  </div>
+                                  <div className="mt-4 pt-3 border-t border-slate-900 flex justify-between items-center">
+                                    <span className="text-xs font-bold text-amber-400 font-mono">{cost.toLocaleString()} 🪙</span>
+                                    <button
+                                      type="button"
+                                      disabled={isBought || !isEligible}
+                                      onClick={() => handleBuyItem('gold_5_0', cost)}
+                                      className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                                        isBought 
+                                          ? 'bg-slate-900 text-slate-600 cursor-not-allowed' 
+                                          : !isEligible
+                                            ? 'bg-slate-900 text-slate-600 cursor-not-allowed'
+                                            : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md active:scale-95 font-extrabold'
+                                      }`}
+                                    >
+                                      {isBought ? '신령 연금 활성됨' : '연금 완성'}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        </div>
+
+                      </div>
+
+                      {/* Right: Unprepared/Teasing coming soon section */}
+                      <div className="col-span-12 lg:col-span-4 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                        <div>
+                          <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-widest font-mono flex items-center gap-1">
+                            🛡️ 입망 준비 중인 신화적 무기 보급 수첩
+                          </span>
+                          <p className="text-xs text-slate-400 mt-2 mb-4 leading-relaxed">
+                            공부 상단의 연금술 총괄 학회가 현재 고난도 고대 유적지 심연의 보수 퀘스트 업데이트와 합쳐 정비 중인 기성 고계 위 기사 단독 장비들입니다.
+                          </p>
+
+                          <div className="space-y-4">
+                            {/* Teaser 1: Mana Elixir */}
+                            <div className="bg-slate-950/40 p-3.5 rounded-xl border border-dashed border-slate-850">
+                              <div className="flex items-center justify-between text-xs font-extrabold text-slate-500">
+                                <span>🧪 신비의 특수 정령 마법 비급</span>
+                                <span className="bg-slate-900 text-slate-500 text-[8px] px-1.5 py-0.5 rounded font-bold">대기 중</span>
+                              </div>
+                              <p className="text-[11px] text-slate-600 mt-1.5">새로운 정령형 신 수호수들을 다수 전장 동맹 수집할 수 있는 청정 앰플 정제수입니다.</p>
+                              <span className="text-[9.5px] text-amber-650 font-bold block mt-2">상태: ⚖️ 조제 연마 대기 중</span>
+                            </div>
+
+                            {/* Teaser 2: Armor */}
+                            <div className="bg-slate-950/40 p-3.5 rounded-xl border border-dashed border-slate-850">
+                              <div className="flex items-center justify-between text-xs font-extrabold text-slate-500">
+                                <span>🛡️ 성스러운 수호 기사의 성채 갑옷</span>
+                                <span className="bg-slate-900 text-slate-500 text-[8px] px-1.5 py-0.5 rounded font-bold">대기 중</span>
+                              </div>
+                              <p className="text-[11px] text-slate-600 mt-1.5">아바타에 강인한 중갑 플레이트를 입혀 수렴 사냥터 피격 대미지를 추가 반사합니다.</p>
+                              <span className="text-[9.5px] text-indigo-500 font-bold block mt-2">상태: 🔨 드워프 제철소 대장간 야장 중</span>
+                            </div>
+
+                            {/* Teaser 3: Pact */}
+                            <div className="bg-slate-950/40 p-3.5 rounded-xl border border-dashed border-slate-850">
+                              <div className="flex items-center justify-between text-xs font-extrabold text-slate-500">
+                                <span>📜 고대 신룡 협약 계약서</span>
+                                <span className="bg-slate-900 text-slate-500 text-[8px] px-1.5 py-0.5 rounded font-bold">대기 중</span>
+                              </div>
+                              <p className="text-[11px] text-slate-600 mt-1.5">전설 중의 전설, 드래곤과의 직접적인 피의 맹세를 체결하여 광휘 마법을 소환합니다.</p>
+                              <span className="text-[11px] text-rose-500 font-bold block mt-2">상태: 📖 길드 조약 문서 고정 대기</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-850 text-center mt-5">
+                          <p className="text-[10px] text-slate-505 leading-normal">
+                            * 모험가 협조 제안 사항이나 건의할 상점 신설 품목은 언제든 '길드 모험 관리청(GM)'에 사양 전력 접수해 주십시오!
+                          </p>
+                        </div>
+                      </div>
+
+                    </div>
+                  </motion.div>
+                )}
               </AnimatePresence>
             </div>
 
